@@ -8,7 +8,7 @@ basedir = os.path.split(os.path.dirname(os.path.abspath(__file__)))[0]
 sys.path.append(basedir)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import lib.dataloader
+import lib.dataloader, lib.plot
 from Model.Predictor_Parallel import Predictor
 
 tf.app.flags.DEFINE_string('output_dir', '', '')
@@ -61,6 +61,7 @@ if FLAGS.use_cross_validation:
         os.makedirs(fold_dir)
 
         model.mnist_pretrain(BATCH_SIZE, output_dir)
+        lib.plot.reset()
         model.fit(dataset['all_images'][train_idx], dataset['all_targets'][train_idx], EPOCHS, BATCH_SIZE, fold_dir)
 
         test_rmd = dataset['all_images'][test_idx].shape[0] % len(DEVICES)
@@ -91,6 +92,7 @@ else:
     # build model
     model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS, DEVICES, **hp)
     model.mnist_pretrain(BATCH_SIZE, output_dir)
+    lib.plot.reset()
     model.fit(dataset['train_images'], dataset['train_targets'], EPOCHS, BATCH_SIZE, output_dir)
 
     test_rmd = dataset['test_images'].shape[0] % len(DEVICES)

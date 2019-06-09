@@ -103,19 +103,22 @@ class Predictor:
 
     def _build_seq2seq(self, split_idx):
         output = self.input_splits[split_idx]
-        for i in range(self.nb_layers):
-            if i == 0:
-                output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
-                                                resample=None)
-            else:
-                output = resblock('ResBlock%d' % (i), self.output_dim, self.output_dim, self.filter_size, output,
-                                  None, self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
+        with tf.variable_scope('pretrain_effect_zone'):
+            for i in range(self.nb_layers):
+                if i == 0:
+                    output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
+                                                    resample=None)
+                else:
+                    output = resblock('ResBlock%d' % (i), self.output_dim, self.output_dim, self.filter_size, output,
+                                      None, self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
-        mnist_output = lib.ops.Linear.linear('mnist_output', self.output_dim, 10,
-                                             tf.reshape(output, [output.shape[0], -1]))
+            # aggregate conv feature maps
+            output = tf.reduce_mean(output, axis=[2])  # more clever attention mechanism for weighting the contribution
 
-        # aggregate conv feature maps
-        output = tf.reduce_mean(output, axis=[2])  # more clever attention mechanism for weighting the contribution
+            sha = output.get_shape().as_list()
+
+            mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(sha[1:]), 10,
+                                                 tf.reshape(output, [-1, np.prod(sha[1:])]))
 
         encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', self.output_dim, output, self.max_size[0])
         decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 8)
@@ -192,8 +195,11 @@ class Predictor:
             self.pretrain_acc += [pretrain_acc]
 
     def _train(self, split_idx):
-        gv = self.optimizer.compute_gradients(self.cost[split_idx])
-        mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx])
+        gv = self.optimizer.compute_gradients(self.cost[split_idx]
+                                              , var_list = [var for var in tf.trainable_variables() if 'mnist' not in var.name])
+        mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx]
+                                                                   , var_list=[var for var in tf.trainable_variables()
+                                                          if 'pretrain' in var.name ])
         if not hasattr(self, 'gv'):
             self.gv = [gv]
             self.mnist_gv = [mnist_gv]
@@ -239,35 +245,14 @@ class Predictor:
         self.mnist_gv = self._average_gradients(self.mnist_gv)
 
     def _average_gradients(self, tower_grads):
-        """Calculate the average gradient for each shared variable across all towers.
-        Note that this function provides a synchronization point across all towers.
-        Args:
-          tower_grads: List of lists of (gradient, variable) tuples. The outer list
-            is over individual gradients. The inner list is over the gradient
-            calculation for each tower.
-        Returns:
-           List of pairs of (gradient, variable) where the gradient has been averaged
-           across all towers.
-        """
         average_grads = []
         for grad_and_vars in zip(*tower_grads):
-            # Note that each grad_and_vars looks like the following:
-            #   ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
             grads = []
             for g, _ in grad_and_vars:
-                # Add 0 dimension to the gradients to represent the tower.
                 expanded_g = tf.expand_dims(g, 0)
-
-                # Append on a 'tower' dimension which we will average over below.
                 grads.append(expanded_g)
-
-            # Average over the 'tower' dimension.
             grad = tf.concat(axis=0, values=grads)
             grad = tf.reduce_mean(grad, 0)
-
-            # Keep in mind that the Variables are redundant because they are shared
-            # across towers. So .. we will just return the first tower's pointer to
-            # the Variable.
             v = grad_and_vars[0][1]
             grad_and_var = (grad, v)
             average_grads.append(grad_and_var)
@@ -316,7 +301,8 @@ class Predictor:
         os.makedirs(pretrain_dir)
 
         ((train_data, train_targets), (test_data, test_targets)) = tf.keras.datasets.mnist.load_data()
-
+        train_data = train_data[:, :, :, None]
+        test_data = test_data[:, :, :, None]
         train_data = self.uniform_data(train_data) / 255.
         test_data = self.uniform_data(test_data) / 255.
 

@@ -36,7 +36,7 @@ def load_and_preprocess_image(path_images):
     for img_ph in path_images:
         im = Image.open(img_ph)
         size = list(im.size)
-        img_data = np.array(im.getdata()).reshape([*size, 3])[:, :, 0] / 255.
+        img_data = np.array(im.getdata()).reshape([*size, 3])[:, :, 0:1] / 255.
 
         if size[0] != max_size[0]:
             left = abs(max_size[0] - size[0]) // 2
