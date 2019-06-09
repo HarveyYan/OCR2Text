@@ -19,7 +19,7 @@ FLAGS = tf.app.flags.FLAGS
 
 BATCH_SIZE = 200 * FLAGS.nb_gpus  if FLAGS.nb_gpus > 0 else 200
 EPOCHS = FLAGS.epochs  # How many iterations to train for
-N_EMB = 3 # 3 channels for augmented images
+N_EMB = 1 # 3 channels for augmented images
 DEVICES = ['/gpu:%d' % (i) for i in range(FLAGS.nb_gpus)] if FLAGS.nb_gpus > 0 else ['/cpu:0']
 
 dataset = lib.dataloader.load_ocr_dataset(use_cross_validation=FLAGS.use_cross_validation)
@@ -60,6 +60,7 @@ if FLAGS.use_cross_validation:
         fold_dir = os.path.join(output_dir, 'fold-%d' % (fold))
         os.makedirs(fold_dir)
 
+        model.mnist_pretrain(BATCH_SIZE, output_dir)
         model.fit(dataset['all_images'][train_idx], dataset['all_targets'][train_idx], EPOCHS, BATCH_SIZE, fold_dir)
 
         test_rmd = dataset['all_images'][test_idx].shape[0] % len(DEVICES)
@@ -89,6 +90,7 @@ if FLAGS.use_cross_validation:
 else:
     # build model
     model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS, DEVICES, **hp)
+    model.mnist_pretrain(BATCH_SIZE, output_dir)
     model.fit(dataset['train_images'], dataset['train_targets'], EPOCHS, BATCH_SIZE, output_dir)
 
     test_rmd = dataset['test_images'].shape[0] % len(DEVICES)

@@ -36,7 +36,7 @@ def load_and_preprocess_image(path_images):
     for img_ph in path_images:
         im = Image.open(img_ph)
         size = list(im.size)
-        img_data = np.array(im.getdata()).reshape([*size, 3]) / 255.
+        img_data = np.array(im.getdata()).reshape([*size, 3])[:, :, 0] / 255.
 
         if size[0] != max_size[0]:
             left = abs(max_size[0] - size[0]) // 2
@@ -44,7 +44,7 @@ def load_and_preprocess_image(path_images):
 
             if size[0] < max_size[0]:
                 img_data = np.concatenate(
-                    [np.zeros((left, size[1], 3)), img_data, np.zeros((right, size[1], 3))], axis=0)
+                    [np.zeros((left, size[1], 1)), img_data, np.zeros((right, size[1], 1))], axis=0)
             else:
                 img_data = img_data[left:size[0] - right, :, :]
         size[0] = max_size[0]
@@ -55,7 +55,7 @@ def load_and_preprocess_image(path_images):
 
             if size[1] < max_size[1]:
                 img_data = np.concatenate(
-                    [np.zeros((size[0], top, 3)), img_data, np.zeros((size[0], down, 3))], axis=1)
+                    [np.zeros((size[0], top, 1)), img_data, np.zeros((size[0], down, 1))], axis=1)
             else:
                 img_data = img_data[:, top:size[1] - down, :]
         size[1] = max_size[1]
