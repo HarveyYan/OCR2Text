@@ -60,7 +60,7 @@ class Predictor:
         self.input_splits = tf.split(self.input_ph, len(self.gpu_device_list))
 
         self.labels = tf.placeholder(tf.int32,
-                                     shape=[None, 8])  # two rounds of step 2 downsampling from an image of width 60
+                                     shape=[None, 3])  # two rounds of step 2 downsampling from an image of width 60
         self.labels_split = tf.split(self.labels, len(self.gpu_device_list))
 
         self.mnist_labels = tf.placeholder(tf.int32, shape=[None, ])
@@ -121,7 +121,7 @@ class Predictor:
                                                  tf.reshape(output, [-1, np.prod(sha[1:])]))
 
         encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', self.output_dim, output, self.max_size[0])
-        decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 8)
+        decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 3)
         output = lib.ops.Linear.linear('MapToOutputEmb', self.output_dim * 2, self.nb_class, decoder_outputs)
 
         if not hasattr(self, 'output'):
@@ -376,7 +376,6 @@ class Predictor:
         size_train = len(X)
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         best_dev_cost = np.inf
-        best_dev_acc = 0
         lib.plot.set_output_dir(output_dir)
         for epoch in range(epochs):
             permute = np.random.permutation(np.arange(size_train))
@@ -412,8 +411,8 @@ class Predictor:
             lib.plot.flush()
             lib.plot.tick()
 
-            if dev_sample_acc > best_dev_acc:
-                best_dev_acc = dev_sample_acc
+            if dev_cost < best_dev_cost:
+                best_dev_cost = dev_cost
                 save_path = self.saver.save(self.sess, checkpoints_dir, global_step=epoch)
                 print('Validation sample acc improved. Saved to path %s\n' % (save_path), flush=True)
             else:

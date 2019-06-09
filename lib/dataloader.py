@@ -16,7 +16,7 @@ expr_target_file = os.path.join(basedir, 'Data', 'cell_images', 'validation_set_
 all_allowed_characters = list(map(lambda i: str(i), range(10))) + ['.' , '-', '!'] #+ ['-', '.', ',', '!']  # '!' is the eol signal
 max_size = None
 image_load_func = None
-digits_limit = 8
+digits_limit = 3
 
 
 def determine_largest_size(path_images):
