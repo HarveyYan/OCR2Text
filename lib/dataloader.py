@@ -13,7 +13,7 @@ dataset_target_file = os.path.join(basedir, 'Data', 'cell_images', 'training_set
 expr_data_dir = os.path.join(basedir, 'Data', 'cell_images', 'validation_set', 'BW')
 expr_target_file = os.path.join(basedir, 'Data', 'cell_images', 'validation_set_values.txt')
 
-all_allowed_characters = list(map(lambda i: str(i), range(10))) + ['!'] #+ ['-', '.', ',', '!']  # '!' is the eol signal
+all_allowed_characters = list(map(lambda i: str(i), range(10))) + ['.' , '-', '!'] #+ ['-', '.', ',', '!']  # '!' is the eol signal
 max_size = None
 image_load_func = None
 digits_limit = 8
@@ -88,6 +88,7 @@ def load_ocr_dataset(**kwargs):
         for line in lines:
             all_ids.append(line.rstrip().split(';')[0])
             target = line.rstrip().split(';')[-1]
+            target = target.replace(',', '.')
             encode_target = []
             for i, c in enumerate(target):
                 if c in all_allowed_characters:

@@ -51,7 +51,7 @@ class Predictor:
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
             self.train_op = self.optimizer.apply_gradients(self.gv)
             self._stats()
-            self.saver = tf.train.Saver(max_to_keep=100)
+            self.saver = tf.train.Saver(max_to_keep=1000)
             self.init = tf.global_variables_initializer()
         self._init_session()
 
