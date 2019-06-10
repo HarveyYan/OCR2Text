@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from lib.resutils import OptimizedResBlockDisc1, resblock
 from lib.RNN_Encoder_Decoder import BiLSTMEncoder, AttentionDecoder
 import lib.ops.LSTM, lib.ops.Linear
-import lib.plot
+import lib.plot, lib.dataloader
 
 
 class Predictor:
@@ -42,6 +42,7 @@ class Predictor:
         with self.g.as_default():
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+            # self.length_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
             for i, device in enumerate(self.gpu_device_list):
                 with tf.device(device), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
@@ -53,6 +54,7 @@ class Predictor:
                     self._train(i)
             self._merge()
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
+            # self.length_train_op = self.length_optimizer.apply_gradients(self.length_gv)
             self.train_op = self.optimizer.apply_gradients(self.gv)
             self._stats()
             self.saver = tf.train.Saver(max_to_keep=1000)
@@ -143,9 +145,9 @@ class Predictor:
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
 
         # auxiliary loss on length
-        nb_digits_output = lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * self.nb_class,
+        nb_digits_output = lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
                                                  self.nb_length_class,
-                                                 tf.reshape(output, [-1, self.nb_max_digits * self.nb_class]))
+                                                 tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
 
         if not hasattr(self, 'output'):
             self.output = [output]
@@ -229,9 +231,12 @@ class Predictor:
             self.length_cost += [length_cost]
 
     def _train(self, split_idx):
-        gv = self.optimizer.compute_gradients(self.cost[split_idx] + self.length_cost[split_idx]
+        gv = self.optimizer.compute_gradients(self.cost[split_idx] + 0.1*self.length_cost[split_idx]
                                               , var_list=[var for var in tf.trainable_variables() if
-                                                          'mnist' not in var.name])
+                                                          'mnist_output' not in var.name]) # and 'NBDigitsOutput' not in var.name])
+        # length_gv = self.optimizer.compute_gradients(self.length_cost[split_idx]
+        #                                       , var_list=[var for var in tf.trainable_variables() if
+        #                                                   'mnist_output' and 'NBDigitsOutput' not in var.name])
         mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx]
                                                                    , var_list=[var for var in tf.trainable_variables()
                                                                                if 'pretrain' in var.name])
@@ -309,32 +314,33 @@ class Predictor:
         lib.plot.reset()
 
     def uniform_data(self, data):
-        if data.shape[1] != self.max_size[0]:
-            left = abs(self.max_size[0] - data.shape[1]) // 2
-            right = abs(self.max_size[0] - data.shape[1]) - left
+        if data.shape[1] != self.max_size[0]: # height
+            top = abs(self.max_size[0] - data.shape[1]) // 2
+            down = abs(self.max_size[0] - data.shape[1]) - top
 
             if data.shape[1] < self.max_size[0]:
                 data = np.concatenate(
-                    [np.zeros((data.shape[0], left, data.shape[2], 1)), data,
-                     np.zeros((data.shape[0], right, data.shape[2], 1))], axis=1)
+                    [np.zeros((data.shape[0], top, data.shape[2], 1)), data,
+                     np.zeros((data.shape[0], down, data.shape[2], 1))], axis=1)
             else:
-                data = data[:, left:data.shape[1] - right, :, :]
+                data = data[:, top:data.shape[1] - down, :, :]
 
         if data.shape[2] != self.max_size[1]:
-            top = abs(data.shape[2] - self.max_size[1]) // 2
-            down = abs(data.shape[2] - self.max_size[1]) - top
+            left = abs(data.shape[2] - self.max_size[1]) // 2
+            right = abs(data.shape[2] - self.max_size[1]) - left
 
             if data.shape[2] < self.max_size[1]:
                 data = np.concatenate(
-                    [np.zeros((data.shape[0], data.shape[1], top, 1)), data,
-                     np.zeros((data.shape[0], data.shape[1], down, 1))], axis=2)
+                    [np.zeros((data.shape[0], data.shape[1], left, 1)), data,
+                     np.zeros((data.shape[0], data.shape[1], right, 1))], axis=2)
             else:
-                data = data[:, :, top:data.shape[2] - down, :]
+                data = data[:, :, left:data.shape[2] - right, :]
 
         return data
 
     def mnist_pretrain(self, batch_size, output_dir):
-        pretrain_dir = os.path.join(output_dir, 'pretrain/')
+        ''' first stage of pretraining — CNN filters'''
+        pretrain_dir = os.path.join(output_dir, 'pretrain_resnet/')
         os.makedirs(pretrain_dir)
 
         ((train_data, train_targets), (test_data, test_targets)) = tf.keras.datasets.mnist.load_data()
@@ -346,7 +352,7 @@ class Predictor:
         size_train = len(train_data)
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         lib.plot.set_output_dir(pretrain_dir)
-        for epoch in range(50):
+        for epoch in range(25):
             permute = np.random.permutation(np.arange(size_train))
             train_data = train_data[permute]
             train_targets = train_targets[permute]
@@ -374,6 +380,63 @@ class Predictor:
             dev_cost, dev_acc = self.mnist_evaluate(test_data, test_targets, batch_size)
             lib.plot.plot('dev_cost', dev_cost)
             lib.plot.plot('dev_acc', dev_acc)
+
+            lib.plot.flush()
+            lib.plot.tick()
+        lib.plot.reset()
+
+        ''' second stage of pretraining — seq2seq'''
+        pretrain_dir = os.path.join(output_dir, 'pretrain_seq2seq/')
+        os.makedirs(pretrain_dir)
+        # arrange targets to translation format
+        train_targets = np.array(list(map(
+            lambda x: [x] + [lib.dataloader.all_allowed_characters.index('!')]
+                      * (self.nb_max_digits - 1), train_targets)))
+        test_targets = np.array(list(map(
+            lambda x: [x] + [lib.dataloader.all_allowed_characters.index('!')]
+                      * (self.nb_max_digits - 1), test_targets)))
+
+        train_length_targets = np.ones((train_targets.shape[0],))
+        test_length_targets = np.ones((test_targets.shape[0],))
+
+        iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
+        lib.plot.set_output_dir(pretrain_dir)
+        for epoch in range(25):
+            permute = np.random.permutation(np.arange(size_train))
+            train_data = train_data[permute]
+            train_targets = train_targets[permute]
+
+            # trim
+            train_rmd = train_data.shape[0] % len(self.gpu_device_list)
+            if train_rmd != 0:
+                train_data = train_data[:-train_rmd]
+                train_targets = train_targets[:-train_rmd]
+
+            for i in tqdm(range(iters_per_epoch)):
+                _data, _labels, _length_labels = train_data[i * batch_size: (i + 1) * batch_size], \
+                                                 train_targets[i * batch_size: (i + 1) * batch_size], \
+                                                 train_length_targets[i * batch_size: (i + 1) * batch_size]
+
+                self.sess.run(self.train_op,
+                              feed_dict={self.input_ph: _data,
+                                         self.labels: _labels,
+                                         self.nb_digits_labels: _length_labels,
+                                         self.is_training_ph: True}
+                              )
+
+            train_cost, train_char_acc, train_sample_acc, train_length_cost = \
+                self.evaluate(train_data, train_targets, train_length_targets, batch_size)
+            lib.plot.plot('train_cost', train_cost)
+            lib.plot.plot('train_char_acc', train_char_acc)
+            lib.plot.plot('train_sample_acc', train_sample_acc)
+            lib.plot.plot('train_length_cost', train_length_cost)
+
+            dev_cost, dev_char_acc, dev_sample_acc, dev_length_cost = \
+                self.evaluate(test_data, test_targets, test_length_targets, batch_size)
+            lib.plot.plot('dev_cost', dev_cost)
+            lib.plot.plot('dev_char_acc', dev_char_acc)
+            lib.plot.plot('dev_sample_acc', dev_sample_acc)
+            lib.plot.plot('dev_length_cost', dev_length_cost)
 
             lib.plot.flush()
             lib.plot.tick()

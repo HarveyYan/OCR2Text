@@ -1,7 +1,7 @@
 import os
+import cv2
 import sys
 import numpy as np
-from PIL import Image
 from sklearn.model_selection import KFold
 
 basedir = os.path.split(os.path.dirname(os.path.abspath(__file__)))[0]
@@ -23,8 +23,8 @@ digits_limit = 10
 def determine_largest_size(path_images):
     max_size = [0, 0]
     for path_image in path_images:
-        im = Image.open(path_image)
-        for i, s in enumerate(im.size):
+        im = cv2.imread(path_image)
+        for i, s in enumerate(im.shape[:2]):
             if max_size[i] < s:
                 max_size[i] = s
     return max_size
@@ -35,34 +35,29 @@ def load_and_preprocess_image(path_images):
         raise ValueError('Need to determine a consensus size!')
     all_images = []
     for img_ph in path_images:
-        im = Image.open(img_ph)
-        size = list(im.size)
-        if np.prod(np.array(im.getdata()).shape) != np.prod(size):
-            channels = 3
-        else:
-            channels = 1
-        img_data = np.array(im.getdata()).reshape([*size, channels])[:, :, 0:1] / 255.
+        img_data = cv2.imread(img_ph)[:, :, :1] // 255.
+        size = list(img_data.shape[:2])
 
-        if size[0] != max_size[0]:
-            left = abs(max_size[0] - size[0]) // 2
-            right = abs(max_size[0] - size[0]) - left
+        if size[0] != max_size[0]: # height
+            top = abs(max_size[0] - size[0]) // 2
+            down = abs(max_size[0] - size[0]) - top
 
             if size[0] < max_size[0]:
                 img_data = np.concatenate(
-                    [np.zeros((left, size[1], 1)), img_data, np.zeros((right, size[1], 1))], axis=0)
+                    [np.zeros((top, size[1], 1)), img_data, np.zeros((down, size[1], 1))], axis=0)
             else:
-                img_data = img_data[left:size[0] - right, :, :]
+                img_data = img_data[top:size[0] - down, :, :]
         size[0] = max_size[0]
 
-        if size[1] != max_size[1]:
-            top = abs(max_size[1] - size[1]) // 2
-            down = abs(max_size[1] - size[1]) - top
+        if size[1] != max_size[1]: # width
+            left = abs(max_size[1] - size[1]) // 2
+            right = abs(max_size[1] - size[1]) - left
 
             if size[1] < max_size[1]:
                 img_data = np.concatenate(
-                    [np.zeros((size[0], top, 1)), img_data, np.zeros((size[0], down, 1))], axis=1)
+                    [np.zeros((size[0], left, 1)), img_data, np.zeros((size[0], right, 1))], axis=1)
             else:
-                img_data = img_data[:, top:size[1] - down, :]
+                img_data = img_data[:, left:size[1] - right, :]
         size[1] = max_size[1]
 
         all_images.append(img_data)
@@ -81,7 +76,8 @@ def load_ocr_dataset(**kwargs):
     # to estimate the largest picture width and height, for downstream padding
     # we need uniform length of the input to enable batch optimization
     global max_size
-    max_size = [80, 40]  # determine_largest_size(all_labeled_images + all_expr_images)
+    max_size = [30, 50] # NHWC
+    # determine_largest_size(all_labeled_images + all_expr_images)
 
     # load all training targets and ids
     all_targets = []

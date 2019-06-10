@@ -30,9 +30,9 @@ N_CLASS = len(lib.dataloader.all_allowed_characters)
 arch = 1
 use_bn = True
 use_lstm = True
-nb_layers = 8
+nb_layers = 4
 filter_size = 3
-output_dim = 32
+output_dim = 16
 learning_rate = 2e-4
 
 HParams = ['arch', 'use_bn', 'use_lstm', 'nb_layers', 'filter_size', 'output_dim', 'learning_rate']
