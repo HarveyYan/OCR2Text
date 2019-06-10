@@ -14,6 +14,7 @@ from Model.Predictor_Parallel import Predictor
 tf.app.flags.DEFINE_string('output_dir', '', '')
 tf.app.flags.DEFINE_integer('epochs', 200, '')
 tf.app.flags.DEFINE_integer('nb_gpus', 1, '')
+tf.app.flags.DEFINE_integer('digits_limits', 10, '')
 tf.app.flags.DEFINE_bool('use_cross_validation', False, '')
 FLAGS = tf.app.flags.FLAGS
 
@@ -22,13 +23,14 @@ EPOCHS = FLAGS.epochs  # How many iterations to train for
 N_EMB = 1 # 3 channels for augmented images
 DEVICES = ['/gpu:%d' % (i) for i in range(FLAGS.nb_gpus)] if FLAGS.nb_gpus > 0 else ['/cpu:0']
 
+lib.dataloader.digits_limit = FLAGS.digits_limits
 dataset = lib.dataloader.load_ocr_dataset(use_cross_validation=FLAGS.use_cross_validation)
 N_CLASS = len(lib.dataloader.all_allowed_characters)
 
 arch = 1
 use_bn = True
 use_lstm = True
-nb_layers = 4
+nb_layers = 8
 filter_size = 3
 output_dim = 32
 learning_rate = 2e-4
@@ -43,15 +45,16 @@ print('Building model with hyper-parameters\n', hp)
 
 cur_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 if FLAGS.output_dir == '':
-    output_dir = os.path.join('output', cur_time)
+    output_dir = os.path.join(basedir, 'output', cur_time)
 else:
-    output_dir = os.path.join('output', cur_time + '-' + FLAGS.output_dir)
+    output_dir = os.path.join(basedir, 'output', cur_time + '-' + FLAGS.output_dir)
 os.makedirs(output_dir)
 
 if FLAGS.use_cross_validation:
 
     # build model
-    model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS, DEVICES, **hp)
+    model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS, DEVICES,
+                      lib.dataloader.max_target_length, lib.dataloader.digits_limit, **hp)
 
     cost, char_acc, sample_acc = 0., 0., 0.
     splits = dataset['splits']
@@ -61,19 +64,21 @@ if FLAGS.use_cross_validation:
         os.makedirs(fold_dir)
 
         model.mnist_pretrain(BATCH_SIZE, output_dir)
-        lib.plot.reset()
-        model.fit(dataset['all_images'][train_idx], dataset['all_targets'][train_idx], EPOCHS, BATCH_SIZE, fold_dir)
+        model.fit(dataset['all_images'][train_idx], dataset['all_targets'][train_idx], dataset['all_length_targets'][train_idx],
+                  EPOCHS, BATCH_SIZE, fold_dir)
 
         test_rmd = dataset['all_images'][test_idx].shape[0] % len(DEVICES)
         if test_rmd != 0:
             test_data = dataset['all_images'][test_idx][:-test_rmd]
             test_targets = dataset['all_targets'][test_idx][:-test_rmd]
+            test_length_targets = dataset['all_length_targets'][test_idx][:-test_rmd]
         else:
             test_data = dataset['all_images'][test_idx]
             test_targets = dataset['all_targets'][test_idx]
+            test_length_targets = dataset['all_length_targets'][test_idx]
 
         test_cost, test_char_acc, test_sample_acc = \
-            model.evaluate(test_data, test_targets, BATCH_SIZE)
+            model.evaluate(test_data, test_targets, test_length_targets, BATCH_SIZE)
 
         cost += test_cost
         char_acc += test_char_acc
@@ -90,23 +95,12 @@ if FLAGS.use_cross_validation:
 
 else:
     # build model
-    model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS, DEVICES, **hp)
+    model = Predictor(lib.dataloader.max_size, N_EMB, N_CLASS,
+                      lib.dataloader.max_target_length, lib.dataloader.digits_limit, DEVICES, **hp)
     model.mnist_pretrain(BATCH_SIZE, output_dir)
-    lib.plot.reset()
-    model.fit(dataset['train_images'], dataset['train_targets'], EPOCHS, BATCH_SIZE, output_dir)
+    model.fit(dataset['train_images'], dataset['train_targets'], dataset['train_length_targets'],
+              EPOCHS, BATCH_SIZE, output_dir, dataset['test_images'], dataset['test_targets'], dataset['test_length_targets'])
 
-    test_rmd = dataset['test_images'].shape[0] % len(DEVICES)
-    if test_rmd != 0:
-        test_data = dataset['test_images'][:-test_rmd]
-        test_targets = dataset['test_targets'][:-test_rmd]
-    else:
-        test_data = dataset['test_images']
-        test_targets = dataset['test_targets']
-
-    cost, char_acc, sample_acc = \
-        model.evaluate(test_data, test_targets, BATCH_SIZE)
-
-    print('Held-out train-test split evaluations, %.3f, %.3f, %.3f' % (cost, char_acc, sample_acc))
 
 all_expr_images, all_expr_ids = lib.dataloader.load_expr_data()
 predictions = model.predict(all_expr_images, BATCH_SIZE)
@@ -116,7 +110,7 @@ outfile.write('filename;value\n')
 # decode step
 for pred, id in zip(predictions, all_expr_ids):
     decoded_digits = [lib.dataloader.all_allowed_characters[pos] for pos in np.argmax(pred, axis=-1)]
-    cutoff = decoded_digits.index('!')
+    cutoff = decoded_digits.index('!') if '!' in decoded_digits else len(decoded_digits)
     decoded = ''.join(decoded_digits[:cutoff])
     print('%s : %s' % (id, decoded))
     outfile.write('%s;%s\n' % (id, decoded))

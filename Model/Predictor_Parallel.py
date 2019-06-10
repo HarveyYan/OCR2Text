@@ -17,11 +17,15 @@ import lib.plot
 
 class Predictor:
 
-    def __init__(self, max_size, nb_emb, nb_class, gpu_device_list=['/gpu:0'], **kwargs):
+    def __init__(self, max_size, nb_emb, nb_class, nb_length_class, nb_max_digits, gpu_device_list=['/gpu:0'],
+                 **kwargs):
         self.max_size = max_size
         self.nb_emb = nb_emb
         self.nb_class = nb_class
+        self.nb_length_class = nb_length_class
+        self.nb_max_digits = nb_max_digits
         self.gpu_device_list = gpu_device_list
+        self.nb_mnist_class = 10
 
         # hyperparams
         self.arch = kwargs.get('arch', 0)
@@ -59,12 +63,23 @@ class Predictor:
         self.input_ph = tf.placeholder(tf.float32, shape=[None, *self.max_size, self.nb_emb])
         self.input_splits = tf.split(self.input_ph, len(self.gpu_device_list))
 
-        self.labels = tf.placeholder(tf.int32,
-                                     shape=[None, 3])  # two rounds of step 2 downsampling from an image of width 60
-        self.labels_split = tf.split(self.labels, len(self.gpu_device_list))
+        self.labels = tf.placeholder(tf.int32, shape=[None, 3])
+        self.labels_split = tf.split(
+            tf.one_hot(self.labels, depth=self.nb_class),
+            len(self.gpu_device_list)
+        )
 
         self.mnist_labels = tf.placeholder(tf.int32, shape=[None, ])
-        self.mnist_labels_splits = tf.split(self.mnist_labels, len(self.gpu_device_list))
+        self.mnist_labels_splits = tf.split(
+            tf.one_hot(self.mnist_labels, depth=10),
+            len(self.gpu_device_list)
+        )
+
+        self.nb_digits_labels = tf.placeholder(tf.int32, shape=[None, ])
+        self.nb_digits_labels_splits = tf.split(
+            tf.one_hot(self.nb_digits_labels, depth=self.nb_length_class),
+            len(self.gpu_device_list)
+        )
 
         self.is_training_ph = tf.placeholder(tf.bool, ())
 
@@ -109,41 +124,57 @@ class Predictor:
                     output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
                                                     resample=None)
                 else:
-                    output = resblock('ResBlock%d' % (i), self.output_dim, self.output_dim, self.filter_size, output,
-                                      None, self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
+                    shape = output.get_shape().as_list()
+                    output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
+                                      self.filter_size, output, 'down' if i % 2 == 1 else None,
+                                      self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
-            # aggregate conv feature maps
-            output = tf.reduce_mean(output, axis=[2])  # more clever attention mechanism for weighting the contribution
+            shape = output.get_shape().as_list()
+            output = tf.reshape(output, [-1, np.prod(shape[1:3]), shape[-1]])
 
-            sha = output.get_shape().as_list()
+            mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
+                                                 tf.reshape(output, [-1, np.prod(shape[1:])]))
 
-            mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(sha[1:]), 10,
-                                                 tf.reshape(output, [-1, np.prod(sha[1:])]))
+        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', self.output_dim, output, np.prod(shape[1:3]))
+        decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
+                                                           self.nb_max_digits)
 
-        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', self.output_dim, output, self.max_size[0])
-        decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 3)
-        output = lib.ops.Linear.linear('MapToOutputEmb', self.output_dim * 2, self.nb_class, decoder_outputs)
+        # translation output
+        output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
+
+        # auxiliary loss on length
+        nb_digits_output = lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * self.nb_class,
+                                                 self.nb_length_class,
+                                                 tf.reshape(output, [-1, self.nb_max_digits * self.nb_class]))
 
         if not hasattr(self, 'output'):
             self.output = [output]
             self.mnist_output = [mnist_output]
+            self.nb_digits_output = [nb_digits_output]
         else:
             self.output += [output]
             self.mnist_output += [mnist_output]
+            self.nb_digits_output += [nb_digits_output]
 
     def _loss(self, type, split_idx):
         if type == 'CE':
             # compute a more efficient loss?
             cost = tf.reduce_mean(
-                tf.nn.softmax_cross_entropy_with_logits(logits=self.output[split_idx],
-                                                        labels=tf.one_hot(self.labels_split[split_idx],
-                                                                          depth=self.nb_class)
-                                                        ))
+                tf.nn.softmax_cross_entropy_with_logits(
+                    logits=self.output[split_idx],
+                    labels=self.labels_split[split_idx]
+                ))
             mnist_cost = tf.reduce_mean(
-                tf.nn.softmax_cross_entropy_with_logits(logits=self.mnist_output[split_idx],
-                                                        labels=tf.one_hot(self.mnist_labels_splits[split_idx],
-                                                                          depth=10)
-                                                        ))
+                tf.nn.softmax_cross_entropy_with_logits(
+                    logits=self.mnist_output[split_idx],
+                    labels=self.mnist_labels_splits[split_idx]
+                ))
+            length_cost = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(
+                    logits=self.nb_digits_output[split_idx],
+                    labels=self.nb_digits_labels_splits[split_idx]
+                )
+            )
             prediction = tf.nn.softmax(self.output[split_idx], axis=-1)
         elif type == 'MSE':
             raise ValueError('MSE is not appropriate in this problem!')
@@ -184,8 +215,10 @@ class Predictor:
         )
 
         if not hasattr(self, 'cost'):
-            self.cost, self.prediction, self.char_acc, self.sample_acc, self.mnist_cost, self.pretrain_acc = \
-                [cost], [prediction], [char_acc], [sample_acc], [mnist_cost], [pretrain_acc]
+            self.cost, self.prediction, self.char_acc, self.sample_acc, \
+            self.mnist_cost, self.pretrain_acc, self.length_cost = \
+                [cost], [prediction], [char_acc], [sample_acc], \
+                [mnist_cost], [pretrain_acc], [length_cost]
         else:
             self.cost += [cost]
             self.prediction += [prediction]
@@ -193,13 +226,15 @@ class Predictor:
             self.sample_acc += [sample_acc]
             self.mnist_cost += [mnist_cost]
             self.pretrain_acc += [pretrain_acc]
+            self.length_cost += [length_cost]
 
     def _train(self, split_idx):
-        gv = self.optimizer.compute_gradients(self.cost[split_idx]
-                                              , var_list = [var for var in tf.trainable_variables() if 'mnist' not in var.name])
+        gv = self.optimizer.compute_gradients(self.cost[split_idx] + self.length_cost[split_idx]
+                                              , var_list=[var for var in tf.trainable_variables() if
+                                                          'mnist' not in var.name])
         mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx]
                                                                    , var_list=[var for var in tf.trainable_variables()
-                                                          if 'pretrain' in var.name ])
+                                                                               if 'pretrain' in var.name])
         if not hasattr(self, 'gv'):
             self.gv = [gv]
             self.mnist_gv = [mnist_gv]
@@ -243,6 +278,8 @@ class Predictor:
         self.mnist_cost = tf.add_n(self.mnist_cost) / len(self.gpu_device_list)
         self.pretrain_acc = tf.add_n(self.pretrain_acc) / len(self.gpu_device_list)
         self.mnist_gv = self._average_gradients(self.mnist_gv)
+
+        self.length_cost = tf.add_n(self.length_cost) / len(self.gpu_device_list)
 
     def _average_gradients(self, tower_grads):
         average_grads = []
@@ -309,7 +346,7 @@ class Predictor:
         size_train = len(train_data)
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         lib.plot.set_output_dir(pretrain_dir)
-        for epoch in range(100):
+        for epoch in range(50):
             permute = np.random.permutation(np.arange(size_train))
             train_data = train_data[permute]
             train_targets = train_targets[permute]
@@ -340,6 +377,7 @@ class Predictor:
 
             lib.plot.flush()
             lib.plot.tick()
+        lib.plot.reset()
 
     def mnist_evaluate(self, X, y, batch_size):
         iters_per_epoch = len(X) // batch_size + (0 if len(X) % batch_size == 0 else 1)
@@ -357,22 +395,28 @@ class Predictor:
             all_acc += _acc * _data.shape[0]
         return all_cost / len(X), all_acc / len(X)
 
-    def fit(self, X, y, epochs, batch_size, output_dir):
+    def fit(self, X, y, y_len, epochs, batch_size, output_dir,
+            dev_data=None, dev_targets=None, dev_length_targets=None):
         checkpoints_dir = os.path.join(output_dir, 'checkpoints/')
         os.makedirs(checkpoints_dir)
 
-        # split validation set
-        dev_data = X[:int(len(X) * 0.1)]
-        dev_targets = y[:int(len(X) * 0.1)]
+        if dev_data is None or dev_targets is None or dev_length_targets is None:
+            # split validation set
+            dev_data = X[:int(len(X) * 0.1)]
+            dev_targets = y[:int(len(X) * 0.1)]
+            dev_length_targets = y_len[:int(len(X) * 0.1)]
+
+            X = X[int(len(X) * 0.1):]
+            y = y[int(len(y) * 0.1):]
+            y_len = y_len[int(len(y) * 0.1):]
 
         # trim development set, batch size should be a multiple of len(self.gpu_device_list)
         dev_rmd = dev_data.shape[0] % len(self.gpu_device_list)
         if dev_rmd != 0:
             dev_data = dev_data[:-dev_rmd]
             dev_targets = dev_targets[:-dev_rmd]
+            dev_length_targets = dev_length_targets[:-dev_rmd]
 
-        X = X[int(len(X) * 0.1):]
-        y = y[int(len(y) * 0.1):]
         size_train = len(X)
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         best_dev_cost = np.inf
@@ -381,32 +425,40 @@ class Predictor:
             permute = np.random.permutation(np.arange(size_train))
             train_data = X[permute]
             train_targets = y[permute]
+            train_length_targets = y_len[permute]
 
             # trim
             train_rmd = train_data.shape[0] % len(self.gpu_device_list)
             if train_rmd != 0:
                 train_data = train_data[:-train_rmd]
                 train_targets = train_targets[:-train_rmd]
+                train_length_targets = train_length_targets[:-train_rmd]
 
             for i in tqdm(range(iters_per_epoch)):
-                _data, _labels = train_data[i * batch_size: (i + 1) * batch_size], \
-                                 train_targets[i * batch_size: (i + 1) * batch_size]
-
+                _data, _labels, _labels_len \
+                    = train_data[i * batch_size: (i + 1) * batch_size], \
+                      train_targets[i * batch_size: (i + 1) * batch_size], \
+                      train_length_targets[i * batch_size: (i + 1) * batch_size]
                 self.sess.run(self.train_op,
                               feed_dict={self.input_ph: _data,
                                          self.labels: _labels,
+                                         self.nb_digits_labels: _labels_len,
                                          self.is_training_ph: True}
                               )
 
-            train_cost, train_char_acc, train_sample_acc = self.evaluate(train_data, train_targets, batch_size)
+            train_cost, train_char_acc, train_sample_acc, train_length_cost = \
+                self.evaluate(train_data, train_targets, train_length_targets, batch_size)
             lib.plot.plot('train_cost', train_cost)
             lib.plot.plot('train_char_acc', train_char_acc)
             lib.plot.plot('train_sample_acc', train_sample_acc)
+            lib.plot.plot('train_length_cost', train_length_cost)
 
-            dev_cost, dev_char_acc, dev_sample_acc = self.evaluate(dev_data, dev_targets, batch_size)
+            dev_cost, dev_char_acc, dev_sample_acc, dev_length_cost = \
+                self.evaluate(dev_data, dev_targets, dev_length_targets, batch_size)
             lib.plot.plot('dev_cost', dev_cost)
             lib.plot.plot('dev_char_acc', dev_char_acc)
             lib.plot.plot('dev_sample_acc', dev_sample_acc)
+            lib.plot.plot('dev_length_cost', dev_length_cost)
 
             lib.plot.flush()
             lib.plot.tick()
@@ -421,22 +473,25 @@ class Predictor:
         print('Loading best weights %s' % (save_path), flush=True)
         self.saver.restore(self.sess, save_path)
 
-    def evaluate(self, X, y, batch_size):
+    def evaluate(self, X, y, y_len, batch_size):
         iters_per_epoch = len(X) // batch_size + (0 if len(X) % batch_size == 0 else 1)
-        all_cost, all_char_acc, all_sample_acc = 0., 0., 0.,
+        all_cost, all_char_acc, all_sample_acc, all_length_cost = 0., 0., 0., 0.
         for i in range(iters_per_epoch):
-            _data, _labels = X[i * batch_size: (i + 1) * batch_size], \
-                             y[i * batch_size: (i + 1) * batch_size]
-            _cost, _char_acc, _sample_acc \
-                = self.sess.run([self.cost, self.char_acc, self.sample_acc],
+            _data, _labels, _labels_len = X[i * batch_size: (i + 1) * batch_size], \
+                                          y[i * batch_size: (i + 1) * batch_size], \
+                                          y_len[i * batch_size: (i + 1) * batch_size]
+            _cost, _char_acc, _sample_acc, _length_cost \
+                = self.sess.run([self.cost, self.char_acc, self.sample_acc, self.length_cost],
                                 feed_dict={self.input_ph: _data,
                                            self.labels: _labels,
+                                           self.nb_digits_labels: _labels_len,
                                            self.is_training_ph: False}
                                 )
             all_cost += _cost * _data.shape[0]
             all_char_acc += _char_acc * _data.shape[0]
             all_sample_acc += _sample_acc * _data.shape[0]
-        return all_cost / len(X), all_char_acc / len(X), all_sample_acc / len(X)
+            all_length_cost += _length_cost * _data.shape[0]
+        return all_cost / len(X), all_char_acc / len(X), all_sample_acc / len(X), all_length_cost / len(X)
 
     def predict(self, X, batch_size):
         all_predictions = []

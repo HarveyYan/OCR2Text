@@ -15,8 +15,9 @@ expr_target_file = os.path.join(basedir, 'Data', 'cell_images', 'validation_set_
 
 all_allowed_characters = list(map(lambda i: str(i), range(10))) + ['.' , '-', '!'] #+ ['-', '.', ',', '!']  # '!' is the eol signal
 max_size = None
+max_target_length = None
 image_load_func = None
-digits_limit = 3
+digits_limit = 10
 
 
 def determine_largest_size(path_images):
@@ -36,7 +37,11 @@ def load_and_preprocess_image(path_images):
     for img_ph in path_images:
         im = Image.open(img_ph)
         size = list(im.size)
-        img_data = np.array(im.getdata()).reshape([*size, 3])[:, :, 0:1] / 255.
+        if np.prod(np.array(im.getdata()).shape) != np.prod(size):
+            channels = 3
+        else:
+            channels = 1
+        img_data = np.array(im.getdata()).reshape([*size, channels])[:, :, 0:1] / 255.
 
         if size[0] != max_size[0]:
             left = abs(max_size[0] - size[0]) // 2
@@ -74,14 +79,13 @@ def load_ocr_dataset(**kwargs):
         np.random.seed(kwargs.get('seed'))
 
     # to estimate the largest picture width and height, for downstream padding
-    # we need uniform length of the input to enable batch optimziation
+    # we need uniform length of the input to enable batch optimization
     global max_size
-    max_size = [60, 30]  # determine_largest_size(all_labeled_images + all_expr_images)
-    # global image_load_func
-    # image_load_func = partial(load_and_preprocess_image, max_size=max_size)
+    max_size = [80, 40]  # determine_largest_size(all_labeled_images + all_expr_images)
 
     # load all training targets and ids
     all_targets = []
+    all_length_targets = []
     all_ids = []
     with open(dataset_target_file, 'r') as file:
         lines = file.readlines()[1:]
@@ -93,14 +97,22 @@ def load_ocr_dataset(**kwargs):
             for i, c in enumerate(target):
                 if c in all_allowed_characters:
                     encode_target.append(all_allowed_characters.index(c))
+            available_length = len(encode_target)
             if len(encode_target) < digits_limit:
                 encode_target += [all_allowed_characters.index('!')] * (digits_limit - len(encode_target))
             elif len(encode_target) > digits_limit:
                 encode_target = encode_target[:digits_limit]
+                available_length = digits_limit
             # this is to ensure all targets are of the same length
             all_targets.append(encode_target)
+            all_length_targets.append(available_length)
     all_targets = np.array(all_targets)
+    all_length_targets = np.array(all_length_targets)
     all_ids = np.array(all_ids)
+
+    # maximum length target
+    global max_target_length
+    max_target_length = np.max(all_length_targets)
 
     # load all images with the order of the targets
     all_labeled_images = load_and_preprocess_image(
@@ -112,6 +124,7 @@ def load_ocr_dataset(**kwargs):
     all_ids = all_ids[permute]
     all_labeled_images = all_labeled_images[permute]
     all_targets = all_targets[permute]
+    all_length_targets = all_length_targets[permute]
 
     if use_cross_validation:
         kf = KFold(n_splits=10)
@@ -120,16 +133,19 @@ def load_ocr_dataset(**kwargs):
             'all_ids': all_ids,
             'all_images': all_labeled_images,
             'all_targets': all_targets,
+            'all_length_targets': all_length_targets,
             'splits': splits
         }
     else:
         test_ids = all_ids[-int(total_size * 0.1):]
         test_images = all_labeled_images[-int(total_size * 0.1):]
         test_targets = all_targets[-int(total_size * 0.1):]
+        test_length_targets = all_length_targets[-int(total_size * 0.1):]
 
         ids = all_ids[:-int(total_size * 0.1)]
         images = all_labeled_images[:-int(total_size * 0.1)]
         targets = all_targets[:-int(total_size * 0.1)]
+        length_targets = all_length_targets[:-int(total_size * 0.1)]
 
         print('dataset size %d\ntraining set %d\ntest set %d' % (
             total_size, len(images), len(test_images)))
@@ -138,9 +154,11 @@ def load_ocr_dataset(**kwargs):
             'train_ids': ids,
             'train_images': images,
             'train_targets': targets,
+            'train_length_targets': length_targets,
             'test_ids': test_ids,
             'test_images': test_images,
-            'test_targets': test_targets
+            'test_targets': test_targets,
+            'test_length_targets': test_length_targets
         }
 
 
@@ -232,20 +250,3 @@ if __name__ == "__main__":
     all_expr_images, all_expr_ids = load_expr_data()
     print(all_expr_images.shape)
     print(all_expr_ids)
-
-    # image_ds = tf.data.Dataset.from_tensor_slices(dataset['train_images']).map(image_load_func, num_parallel_calls=6)
-    # label_ds = tf.data.Dataset.from_tensor_slices(dataset['train_targets'])
-    # image_label_ds = tf.data.Dataset.zip((image_ds, label_ds))
-    #
-    # ds = image_label_ds.shuffle(buffer_size=len(dataset['train_ids']))
-    # ds = ds.repeat()
-    # ds = ds.batch(200)
-    # # `prefetch` lets the dataset fetch batches, in the background while the model is training.
-    # ds = ds.prefetch(buffer_size=6)
-    #
-    # iterator = ds.make_one_shot_iterator()
-    #
-    # sess = tf.Session()
-    # print(sess.run(iterator.get_next()))
-    # iterator = ds.make_one_shot_iterator()
-    # print(sess.run(iterator.get_next()))

@@ -50,8 +50,8 @@ predictor = Predictor(lib.dataloader.max_size, 1, len(lib.dataloader.all_allowed
 predictor.load(os.path.join(basedir, 'output', '20190609-003606-pretrain-seq2seq-include-punc', 'checkpoints', '-2060'))
 
 # load segmented dataset
-training_dataset_path = os.path.join(basedir, 'Data', 'cell_images', 'segments')
-test_dataset_path = os.path.join(basedir, 'Data', 'cell_images', 'validation_set', 'validation_set', 'segments')
+training_dataset_path = os.path.join(basedir, 'Data', 'cell_images', 'training_set', 'segments')
+test_dataset_path = os.path.join(basedir, 'Data', 'cell_images', 'validation_set', 'segments')
 
 all_img_path = []
 all_img_id = []
@@ -64,6 +64,9 @@ for test_sample_dir in os.listdir(test_dataset_path):
 all_img = lib.dataloader.load_and_preprocess_image(all_img_path)
 predictions = predictor.predict(all_img, BATCH_SIZE)
 
+print(all_img_id)
+print(predictions)
+
 outfile = open(os.path.join(output_dir, 'validation_set_values.txt'), 'w')
 
 prev_id = None
@@ -71,7 +74,7 @@ prev_decoded = 'filename;value'
 # decode step
 for pred, id in zip(predictions, all_img_id):
     decoded_digits = [lib.dataloader.all_allowed_characters[pos] for pos in np.argmax(pred, axis=-1)]
-    cutoff = decoded_digits.index('!')
+    cutoff = decoded_digits.index('!') if '!' in decoded_digits else len(decoded_digits)
     decoded = ''.join(decoded_digits[:cutoff])
 
     if prev_id is None or prev_id != id:
