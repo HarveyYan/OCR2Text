@@ -185,7 +185,7 @@ class Predictor:
             tf.cast(
                 tf.equal(
                     tf.to_int32(tf.argmax(self.mnist_output[split_idx], axis=-1)),
-                    self.mnist_labels_splits[split_idx]
+                    tf.to_int32(tf.argmax(self.mnist_labels_splits[split_idx], axis=-1))
                 ),
                 tf.float32
             )
@@ -196,7 +196,7 @@ class Predictor:
             tf.cast(
                 tf.equal(
                     tf.to_int32(tf.argmax(self.output[split_idx], axis=-1)),
-                    self.labels_split[split_idx]
+                    tf.to_int32(tf.argmax(self.labels_split[split_idx], axis=-1))
                 ),
                 tf.float32
             )
@@ -207,7 +207,7 @@ class Predictor:
                 tf.cast(
                     tf.equal(
                         tf.to_int32(tf.argmax(self.output[split_idx], axis=-1)),
-                        self.labels_split[split_idx]
+                        tf.to_int32(tf.argmax(self.labels_split[split_idx], axis=-1))
                     ),
                     tf.float32
                 )
