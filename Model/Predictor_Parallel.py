@@ -63,7 +63,7 @@ class Predictor:
         self.input_ph = tf.placeholder(tf.float32, shape=[None, *self.max_size, self.nb_emb])
         self.input_splits = tf.split(self.input_ph, len(self.gpu_device_list))
 
-        self.labels = tf.placeholder(tf.int32, shape=[None, 3])
+        self.labels = tf.placeholder(tf.int32, shape=[None, self.nb_max_digits])
         self.labels_split = tf.split(
             tf.one_hot(self.labels, depth=self.nb_class),
             len(self.gpu_device_list)
@@ -135,7 +135,7 @@ class Predictor:
             mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
                                                  tf.reshape(output, [-1, np.prod(shape[1:])]))
 
-        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', self.output_dim, output, np.prod(shape[1:3]))
+        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
         decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
                                                            self.nb_max_digits)
 
