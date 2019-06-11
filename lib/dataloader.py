@@ -12,6 +12,7 @@ dataset_dir = os.path.join(basedir, 'Data', 'cell_images', 'training_set', 'BW')
 dataset_target_file = os.path.join(basedir, 'Data', 'cell_images', 'training_set_values.txt')
 expr_data_dir = os.path.join(basedir, 'Data', 'cell_images', 'validation_set', 'BW')
 expr_target_file = os.path.join(basedir, 'Data', 'cell_images', 'validation_set_values.txt')
+validation_annotations_file = os.path.join(basedir, 'Data', 'cell_images', 'validation_solutions.txt')
 
 all_allowed_characters = list(map(lambda i: str(i), range(10))) + ['.' , '-', '!'] #+ ['-', '.', ',', '!']  # '!' is the eol signal
 max_size = None
@@ -108,7 +109,6 @@ def load_ocr_dataset(**kwargs):
     # we need uniform length of the input to enable batch optimization
     global max_size
     max_size = determine_largest_size([os.path.join(dataset_dir, 'clean'+id) for id in all_ids])
-
     # load all images with the order of the targets
     all_labeled_images = load_and_preprocess_image(
         np.array([os.path.join(dataset_dir, 'clean'+id) for id in all_ids]))
@@ -166,6 +166,20 @@ def load_expr_data():
             all_ids.append(line.rstrip().split(';')[0])
     return load_and_preprocess_image([os.path.join(expr_data_dir, 'clean'+id) for id in all_ids]), \
            all_ids
+
+
+def compute_score(path_to_prediction_file):
+    with open(validation_annotations_file, 'r') as truth_file, open(path_to_prediction_file, 'r') as pred_file:
+        truth = {}
+        for line in truth_file.readlines()[1:]:
+            truth[line.rstrip().split(';')[0]] = line.rstrip().split(';')[-1].replace(',', '.')
+        correct = 0
+        for line in pred_file.readlines()[1:]:
+            if line.rstrip().split(';')[-1] == truth[line.rstrip().split(';')[0]]:
+                correct += 1
+            else:
+                print(line.rstrip().split(';')[0], line.rstrip().split(';')[-1], truth[line.rstrip().split(';')[0]])
+    return correct / len(truth)
 
 
 if __name__ == "__main__":

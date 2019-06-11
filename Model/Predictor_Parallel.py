@@ -2,7 +2,6 @@ import numpy as np
 import locale
 import os
 import sys
-from tqdm import tqdm
 import tensorflow as tf
 
 basedir = os.path.split(os.path.dirname(os.path.abspath(__file__)))[0]
@@ -37,12 +36,13 @@ class Predictor:
         self.residual_connection = kwargs.get('residual_connection', 1.0)
         self.output_dim = kwargs.get('output_dim', 32)
         self.learning_rate = kwargs.get('learning_rate', 2e-4)
+        self.lr_multiplier = tf.placeholder_with_default(1.0, ())
 
         self.g = tf.Graph()
         with self.g.as_default():
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-            self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate)
+            self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate*self.lr_multiplier)
             for i, device in enumerate(self.gpu_device_list):
                 with tf.device(device), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
                     if self.arch == 0:
@@ -124,7 +124,7 @@ class Predictor:
                     output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
                                                     resample=None)
                 else:
-                    shape = output.get_shape().as_list() # no downsampling
+                    shape = output.get_shape().as_list()  # no downsampling
                     output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
                                       self.filter_size, output, 'down' if i % 2 == 1 else None,
                                       self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
@@ -146,7 +146,8 @@ class Predictor:
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
 
         # auxiliary loss on length
-        nb_digits_output = lib.ops.LSTM.attention('NBDigitsOutput', 50, decoder_outputs)
+        nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1] * 2, self.nb_length_class,
+                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
         # lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
         #                                      self.nb_length_class,
         #                                      tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
@@ -344,15 +345,15 @@ class Predictor:
         os.makedirs(pretrain_dir)
 
         ((train_data, train_targets), (test_data, test_targets)) = tf.keras.datasets.mnist.load_data()
-        train_data = np.concatenate([train_data[:, :, :, None]]*self.nb_emb, axis=-1)
-        test_data = np.concatenate([test_data[:, :, :, None]]*self.nb_emb, axis=-1)
+        train_data = np.concatenate([train_data[:, :, :, None]] * self.nb_emb, axis=-1)
+        test_data = np.concatenate([test_data[:, :, :, None]] * self.nb_emb, axis=-1)
         train_data = self.uniform_data(train_data) / 255.
         test_data = self.uniform_data(test_data) / 255.
 
         size_train = len(train_data)
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         lib.plot.set_output_dir(pretrain_dir)
-        for epoch in range(25):
+        for epoch in range(50):
             permute = np.random.permutation(np.arange(size_train))
             train_data = train_data[permute]
             train_targets = train_targets[permute]
@@ -363,7 +364,7 @@ class Predictor:
                 train_data = train_data[:-train_rmd]
                 train_targets = train_targets[:-train_rmd]
 
-            for i in tqdm(range(iters_per_epoch)):
+            for i in range(iters_per_epoch):
                 _data, _labels = train_data[i * batch_size: (i + 1) * batch_size], \
                                  train_targets[i * batch_size: (i + 1) * batch_size]
 
@@ -401,7 +402,7 @@ class Predictor:
 
         iters_per_epoch = size_train // batch_size + (0 if size_train % batch_size == 0 else 1)
         lib.plot.set_output_dir(pretrain_dir)
-        for epoch in range(25):
+        for epoch in range(50):
             permute = np.random.permutation(np.arange(size_train))
             train_data = train_data[permute]
             train_targets = train_targets[permute]
@@ -412,7 +413,7 @@ class Predictor:
                 train_data = train_data[:-train_rmd]
                 train_targets = train_targets[:-train_rmd]
 
-            for i in tqdm(range(iters_per_epoch)):
+            for i in range(iters_per_epoch):
                 _data, _labels, _length_labels = train_data[i * batch_size: (i + 1) * batch_size], \
                                                  train_targets[i * batch_size: (i + 1) * batch_size], \
                                                  train_length_targets[i * batch_size: (i + 1) * batch_size]
@@ -497,7 +498,7 @@ class Predictor:
                 train_targets = train_targets[:-train_rmd]
                 train_length_targets = train_length_targets[:-train_rmd]
 
-            for i in tqdm(range(iters_per_epoch)):
+            for i in range(iters_per_epoch):
                 _data, _labels, _labels_len \
                     = train_data[i * batch_size: (i + 1) * batch_size], \
                       train_targets[i * batch_size: (i + 1) * batch_size], \
@@ -506,6 +507,7 @@ class Predictor:
                               feed_dict={self.input_ph: _data,
                                          self.labels: _labels,
                                          self.nb_digits_labels: _labels_len,
+                                         self.lr_multiplier: 1. - i / (epochs * iters_per_epoch) - epoch / epochs,
                                          self.is_training_ph: True}
                               )
 

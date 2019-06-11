@@ -14,7 +14,7 @@ from Model.Predictor_Parallel import Predictor
 tf.app.flags.DEFINE_string('output_dir', '', '')
 tf.app.flags.DEFINE_integer('epochs', 200, '')
 tf.app.flags.DEFINE_integer('nb_gpus', 1, '')
-tf.app.flags.DEFINE_integer('digits_limits', 10, '')
+tf.app.flags.DEFINE_integer('digits_limits', 8, '')
 tf.app.flags.DEFINE_bool('use_cross_validation', False, '')
 FLAGS = tf.app.flags.FLAGS
 
@@ -116,3 +116,5 @@ for pred, id in zip(predictions, all_expr_ids):
     outfile.write('%s;%s\n' % (id, decoded))
     outfile.flush()
 outfile.close()
+
+print('Evaluation:', lib.dataloader.compute_score(os.path.join(output_dir, 'validation_set_values.txt')))
