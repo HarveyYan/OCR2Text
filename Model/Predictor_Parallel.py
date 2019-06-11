@@ -42,8 +42,7 @@ class Predictor:
         with self.g.as_default():
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-            # self.length_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-            self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+            self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate)
             for i, device in enumerate(self.gpu_device_list):
                 with tf.device(device), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
                     if self.arch == 0:
@@ -54,7 +53,6 @@ class Predictor:
                     self._train(i)
             self._merge()
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
-            # self.length_train_op = self.length_optimizer.apply_gradients(self.length_gv)
             self.train_op = self.optimizer.apply_gradients(self.gv)
             self._stats()
             self.saver = tf.train.Saver(max_to_keep=1000)
@@ -126,18 +124,21 @@ class Predictor:
                     output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
                                                     resample=None)
                 else:
-                    shape = output.get_shape().as_list()
+                    shape = output.get_shape().as_list() # no downsampling
                     output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
                                       self.filter_size, output, 'down' if i % 2 == 1 else None,
                                       self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
             shape = output.get_shape().as_list()
-            output = tf.reshape(output, [-1, np.prod(shape[1:3]), shape[-1]])
+            output = tf.reshape(
+                tf.transpose(output, [0, 2, 1, 3]),
+                [-1, np.prod(shape[1:3]), shape[-1]])
 
             mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
                                                  tf.reshape(output, [-1, np.prod(shape[1:])]))
 
         encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
+        # feature dim from BiLSTMEncoder is shape[-1] * 2
         decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
                                                            self.nb_max_digits)
 
@@ -145,9 +146,10 @@ class Predictor:
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
 
         # auxiliary loss on length
-        nb_digits_output = lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
-                                                 self.nb_length_class,
-                                                 tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
+        nb_digits_output = lib.ops.LSTM.attention('NBDigitsOutput', 50, decoder_outputs)
+        # lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
+        #                                      self.nb_length_class,
+        #                                      tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
 
         if not hasattr(self, 'output'):
             self.output = [output]
@@ -231,12 +233,10 @@ class Predictor:
             self.length_cost += [length_cost]
 
     def _train(self, split_idx):
-        gv = self.optimizer.compute_gradients(self.cost[split_idx] + 0.1*self.length_cost[split_idx]
+        gv = self.optimizer.compute_gradients(self.cost[split_idx] + 0.1 * self.length_cost[split_idx]
                                               , var_list=[var for var in tf.trainable_variables() if
-                                                          'mnist_output' not in var.name]) # and 'NBDigitsOutput' not in var.name])
-        # length_gv = self.optimizer.compute_gradients(self.length_cost[split_idx]
-        #                                       , var_list=[var for var in tf.trainable_variables() if
-        #                                                   'mnist_output' and 'NBDigitsOutput' not in var.name])
+                                                          'mnist_output' not in var.name])  # and 'NBDigitsOutput' not in var.name])
+
         mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx]
                                                                    , var_list=[var for var in tf.trainable_variables()
                                                                                if 'pretrain' in var.name])
@@ -314,14 +314,14 @@ class Predictor:
         lib.plot.reset()
 
     def uniform_data(self, data):
-        if data.shape[1] != self.max_size[0]: # height
+        if data.shape[1] != self.max_size[0]:  # height
             top = abs(self.max_size[0] - data.shape[1]) // 2
             down = abs(self.max_size[0] - data.shape[1]) - top
 
             if data.shape[1] < self.max_size[0]:
                 data = np.concatenate(
-                    [np.zeros((data.shape[0], top, data.shape[2], 1)), data,
-                     np.zeros((data.shape[0], down, data.shape[2], 1))], axis=1)
+                    [np.zeros((data.shape[0], top, data.shape[2], self.nb_emb)), data,
+                     np.zeros((data.shape[0], down, data.shape[2], self.nb_emb))], axis=1)
             else:
                 data = data[:, top:data.shape[1] - down, :, :]
 
@@ -331,8 +331,8 @@ class Predictor:
 
             if data.shape[2] < self.max_size[1]:
                 data = np.concatenate(
-                    [np.zeros((data.shape[0], data.shape[1], left, 1)), data,
-                     np.zeros((data.shape[0], data.shape[1], right, 1))], axis=2)
+                    [np.zeros((data.shape[0], data.shape[1], left, self.nb_emb)), data,
+                     np.zeros((data.shape[0], data.shape[1], right, self.nb_emb))], axis=2)
             else:
                 data = data[:, :, left:data.shape[2] - right, :]
 
@@ -344,8 +344,8 @@ class Predictor:
         os.makedirs(pretrain_dir)
 
         ((train_data, train_targets), (test_data, test_targets)) = tf.keras.datasets.mnist.load_data()
-        train_data = train_data[:, :, :, None]
-        test_data = test_data[:, :, :, None]
+        train_data = np.concatenate([train_data[:, :, :, None]]*self.nb_emb, axis=-1)
+        test_data = np.concatenate([test_data[:, :, :, None]]*self.nb_emb, axis=-1)
         train_data = self.uniform_data(train_data) / 255.
         test_data = self.uniform_data(test_data) / 255.
 

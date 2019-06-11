@@ -36,7 +36,7 @@ def load_and_preprocess_image(path_images):
     all_images = []
     for img_ph in path_images:
         img_data = cv2.imread(img_ph)[:, :, :1] // 255.
-        size = list(img_data.shape[:2])
+        size = list(img_data.shape)
 
         if size[0] != max_size[0]: # height
             top = abs(max_size[0] - size[0]) // 2
@@ -44,7 +44,7 @@ def load_and_preprocess_image(path_images):
 
             if size[0] < max_size[0]:
                 img_data = np.concatenate(
-                    [np.zeros((top, size[1], 1)), img_data, np.zeros((down, size[1], 1))], axis=0)
+                    [np.zeros((top, size[1], size[-1])), img_data, np.zeros((down, size[1], size[-1]))], axis=0)
             else:
                 img_data = img_data[top:size[0] - down, :, :]
         size[0] = max_size[0]
@@ -55,7 +55,7 @@ def load_and_preprocess_image(path_images):
 
             if size[1] < max_size[1]:
                 img_data = np.concatenate(
-                    [np.zeros((size[0], left, 1)), img_data, np.zeros((size[0], right, 1))], axis=1)
+                    [np.zeros((size[0], left, size[-1])), img_data, np.zeros((size[0], right, size[-1]))], axis=1)
             else:
                 img_data = img_data[:, left:size[1] - right, :]
         size[1] = max_size[1]
@@ -72,12 +72,6 @@ def load_ocr_dataset(**kwargs):
     if kwargs.get('seed') is not None:
         print('Setting seed to %d' % (kwargs.get('seed')))
         np.random.seed(kwargs.get('seed'))
-
-    # to estimate the largest picture width and height, for downstream padding
-    # we need uniform length of the input to enable batch optimization
-    global max_size
-    max_size = [30, 50] # NHWC
-    # determine_largest_size(all_labeled_images + all_expr_images)
 
     # load all training targets and ids
     all_targets = []
@@ -110,9 +104,14 @@ def load_ocr_dataset(**kwargs):
     global max_target_length
     max_target_length = np.max(all_length_targets)
 
+    # to estimate the largest picture width and height, for downstream padding
+    # we need uniform length of the input to enable batch optimization
+    global max_size
+    max_size = determine_largest_size([os.path.join(dataset_dir, 'clean'+id) for id in all_ids])
+
     # load all images with the order of the targets
     all_labeled_images = load_and_preprocess_image(
-        np.array([os.path.join(dataset_dir, 'clean' + id) for id in all_ids]))
+        np.array([os.path.join(dataset_dir, 'clean'+id) for id in all_ids]))
 
     # initial shuffle
     total_size = len(all_labeled_images)
@@ -158,70 +157,6 @@ def load_ocr_dataset(**kwargs):
         }
 
 
-def load_ocr_dataset_nb_digits(**kwargs):
-    # splits the dataset into 10 fold cross validation, or a held-out train-test split
-    use_cross_validation = kwargs.get('use_cross_validation', False)
-
-    if kwargs.get('seed') is not None:
-        print('Setting seed to %d' % (kwargs.get('seed')))
-        np.random.seed(kwargs.get('seed'))
-
-    global max_size
-    max_size = [60, 30]
-
-    # load all training targets and ids
-    all_targets = []
-    all_ids = []
-    with open(dataset_target_file, 'r') as file:
-        lines = file.readlines()[1:]
-        for line in lines:
-            all_ids.append(line.rstrip().split(';')[0])
-            target = line.rstrip().split(';')[-1]
-            all_targets.append(len(target))
-    all_targets = np.array(all_targets)
-    all_ids = np.array(all_ids)
-
-    # load all images with the order of the targets
-    all_labeled_images = load_and_preprocess_image(np.array([os.path.join(dataset_dir, id) for id in all_ids]))
-
-    # initial shuffle
-    total_size = len(all_labeled_images)
-    permute = np.random.permutation(np.arange(total_size, dtype=np.int32))
-    all_ids = all_ids[permute]
-    all_labeled_images = all_labeled_images[permute]
-    all_targets = all_targets[permute]
-
-    if use_cross_validation:
-        kf = KFold(n_splits=10)
-        splits = kf.split(all_labeled_images)
-        return {
-            'all_ids': all_ids,
-            'all_images': all_labeled_images,
-            'all_targets': all_targets,
-            'splits': splits
-        }
-    else:
-        test_ids = all_ids[-int(total_size * 0.1):]
-        test_images = all_labeled_images[-int(total_size * 0.1):]
-        test_targets = all_targets[-int(total_size * 0.1):]
-
-        ids = all_ids[:-int(total_size * 0.1)]
-        images = all_labeled_images[:-int(total_size * 0.1)]
-        targets = all_targets[:-int(total_size * 0.1)]
-
-        print('dataset size %d\ntraining set %d\ntest set %d' % (
-            total_size, len(images), len(test_images)))
-
-        return {
-            'train_ids': ids,
-            'train_images': images,
-            'train_targets': targets,
-            'test_ids': test_ids,
-            'test_images': test_images,
-            'test_targets': test_targets
-        }
-
-
 def load_expr_data():
     '''prepare the training targets'''
     all_ids = []
@@ -229,16 +164,11 @@ def load_expr_data():
         lines = file.readlines()[1:]
         for line in lines:
             all_ids.append(line.rstrip().split(';')[0])
-    return load_and_preprocess_image([os.path.join(expr_data_dir, 'clean' + id) for id in all_ids]), \
+    return load_and_preprocess_image([os.path.join(expr_data_dir, 'clean'+id) for id in all_ids]), \
            all_ids
 
 
 if __name__ == "__main__":
-    dataset = load_ocr_dataset_nb_digits(use_cross_validation=False)
-    print(dataset['train_images'].shape)
-    print(dataset['train_targets'])
-    exit()
-
     dataset = load_ocr_dataset(use_cross_validation=False)
     print(dataset['train_images'].shape)
     print(dataset['train_targets'])
