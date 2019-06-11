@@ -36,10 +36,10 @@ class Predictor:
         self.residual_connection = kwargs.get('residual_connection', 1.0)
         self.output_dim = kwargs.get('output_dim', 32)
         self.learning_rate = kwargs.get('learning_rate', 2e-4)
-        self.lr_multiplier = tf.placeholder_with_default(1.0, ())
 
         self.g = tf.Graph()
         with self.g.as_default():
+            self.lr_multiplier = tf.placeholder_with_default(1.0, ())
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate*self.lr_multiplier)
@@ -142,12 +142,14 @@ class Predictor:
         decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
                                                            self.nb_max_digits)
 
+        # auxiliary loss on length
+        nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
+                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
+
         # translation output
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
 
-        # auxiliary loss on length
-        nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1] * 2, self.nb_length_class,
-                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
+
         # lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
         #                                      self.nb_length_class,
         #                                      tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
