@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from lib.resutils import OptimizedResBlockDisc1, resblock
 from lib.RNN_Encoder_Decoder import BiLSTMEncoder, AttentionDecoder
 import lib.ops.LSTM, lib.ops.Linear
-import lib.plot, lib.dataloader
+import lib.plot, lib.dataloader, lib.clr
 
 
 class Predictor:
@@ -42,7 +42,11 @@ class Predictor:
             self.lr_multiplier = tf.placeholder_with_default(1.0, ())
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-            self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate*self.lr_multiplier)
+            # everybody loves NAG
+            self.optimizer = tf.contrib.opt.MomentumWOptimizer(weight_decay=0.001,
+                                                               momentum=0.9,
+                                                               learning_rate=self.learning_rate * self.lr_multiplier,
+                                                               use_nesterov=True)
             for i, device in enumerate(self.gpu_device_list):
                 with tf.device(device), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
                     if self.arch == 0:
@@ -148,7 +152,6 @@ class Predictor:
 
         # translation output
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
-
 
         # lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
         #                                      self.nb_length_class,
@@ -509,7 +512,8 @@ class Predictor:
                               feed_dict={self.input_ph: _data,
                                          self.labels: _labels,
                                          self.nb_digits_labels: _labels_len,
-                                         self.lr_multiplier: 1. - i / (epochs * iters_per_epoch) - epoch / epochs,
+                                         self.lr_multiplier: lib.clr.cyclic_learning_rate(i, 0.1, 10., iters_per_epoch),
+                                         # self.lr_multiplier: 1. - i / (epochs * iters_per_epoch) - epoch / epochs,
                                          self.is_training_ph: True}
                               )
 
