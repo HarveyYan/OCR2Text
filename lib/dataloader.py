@@ -169,6 +169,7 @@ def load_expr_data():
 
 
 def compute_score(path_to_prediction_file):
+    print('Classification errors')
     with open(validation_annotations_file, 'r') as truth_file, open(path_to_prediction_file, 'r') as pred_file:
         truth = {}
         for line in truth_file.readlines()[1:]:

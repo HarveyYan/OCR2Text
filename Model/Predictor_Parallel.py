@@ -9,7 +9,7 @@ sys.path.append(basedir)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from lib.resutils import OptimizedResBlockDisc1, resblock
-from lib.RNN_Encoder_Decoder import BiLSTMEncoder, AttentionDecoder
+from lib.RNN_Encoder_Decoder import BiLSTMEncoder, AttentionDecoder, BeamAttDecoder
 import lib.ops.LSTM, lib.ops.Linear
 import lib.plot, lib.dataloader, lib.clr
 
@@ -36,25 +36,42 @@ class Predictor:
         self.residual_connection = kwargs.get('residual_connection', 1.0)
         self.output_dim = kwargs.get('output_dim', 32)
         self.learning_rate = kwargs.get('learning_rate', 2e-4)
+        self.use_clr = kwargs.get('use_clr', False)
+        self.use_momentum = kwargs.get('use_momentum', False)
+        self.length_obj_ratio = kwargs.get('length_obj_ratio', 0.1)
 
-        self.g = tf.Graph()
+        self.g = tf.get_default_graph()
         with self.g.as_default():
-            self.lr_multiplier = tf.placeholder_with_default(1.0, ())
             self._placeholders()
             self.mnist_pretrain_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-            # everybody loves NAG
-            self.optimizer = tf.contrib.opt.MomentumWOptimizer(weight_decay=0.001,
-                                                               momentum=0.9,
-                                                               learning_rate=self.learning_rate * self.lr_multiplier,
-                                                               use_nesterov=True)
+
+            if self.use_momentum:
+                # everybody loves NAG — wait, scrape that one
+                self.optimizer = tf.contrib.opt.MomentumWOptimizer(
+                    1e-4, self.learning_rate * self.lr_multiplier,
+                    0.9, use_nesterov=True
+                )
+            else:
+                self.optimizer = tf.contrib.opt.AdamWOptimizer(
+                    weight_decay=1e-4,
+                    learning_rate=self.learning_rate * self.lr_multiplier
+                )
+
             for i, device in enumerate(self.gpu_device_list):
                 with tf.device(device), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
                     if self.arch == 0:
-                        self._build_residual_classifier(i)
+                        raise Exception('baseline disabled (constructing CTC)')
+                        # self._build_residual_classifier(i)
                     else:
-                        self._build_seq2seq(i)
+                        # self._build_seq2seq(i, mode='training')
+                        self._build_beam_seq2seq(i, mode='training')
                     self._loss('CE' if self.nb_class > 1 else 'MSE', i)
                     self._train(i)
+
+            with tf.device(self.gpu_device_list[0]), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
+                # self._build_seq2seq(i, None, mode='inference')
+                self._build_beam_seq2seq(None, mode='inference')
+
             self._merge()
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
             self.train_op = self.optimizer.apply_gradients(self.gv)
@@ -66,6 +83,8 @@ class Predictor:
     def _placeholders(self):
         self.input_ph = tf.placeholder(tf.float32, shape=[None, *self.max_size, self.nb_emb])
         self.input_splits = tf.split(self.input_ph, len(self.gpu_device_list))
+
+        self.inference_input_ph = tf.placeholder(tf.float32, shape=[None, *self.max_size, self.nb_emb])
 
         self.labels = tf.placeholder(tf.int32, shape=[None, self.nb_max_digits])
         self.labels_split = tf.split(
@@ -86,42 +105,22 @@ class Predictor:
         )
 
         self.is_training_ph = tf.placeholder(tf.bool, ())
-
-    def _build_residual_classifier(self, split_idx):
-        output = self.input_splits[split_idx]
-        for i in range(self.nb_layers):
-            if i == 0:
-                output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
-                                                resample=None)
-            else:
-                output = resblock('ResBlock%d' % (i), self.output_dim, self.output_dim, self.filter_size, output,
-                                  'down' if i % 2 == 1 else None, self.is_training_ph, use_bn=self.use_bn,
-                                  r=self.residual_connection)
-                # [60, 30] --> [30, 15] --> [15, 7] --> [7, 3]
-            # if i % 2 == 1:
-            #     output = lib.ops.LSTM.sn_non_local_block_sim('self-attention', output)
-
-        mnist_output = lib.ops.Linear.linear('mnist_output', self.output_dim, 10,
-                                             tf.reshape(output, [output.shape[0], -1]))
-
-        # aggregate conv feature maps
-        output = tf.reduce_mean(output, axis=[2])  # more clever attention mechanism for weighting the contribution
-
-        if self.use_lstm:
-            output = lib.ops.LSTM.bilstm('BILSTM', self.output_dim, output, tf.shape(output)[1])
-
-        output = lib.ops.Linear.linear('AMOutput', self.output_dim * 2 if self.use_lstm else self.output_dim,
-                                       self.nb_class, output)
-
-        if not hasattr(self, 'output'):
-            self.output = [output]
-            self.mnist_output = [mnist_output]
+        self.global_step = tf.placeholder(tf.int32, ())
+        self.hf_iters_per_epoch = tf.placeholder(tf.int32, ())
+        if self.use_clr:
+            self.lr_multiplier = lib.clr.cyclic_learning_rate(self.global_step, 0.5, 5.,
+                                                              self.hf_iters_per_epoch, mode='exp_range')
         else:
-            self.output += [output]
-            self.mnist_output += [mnist_output]
+            self.lr_multiplier = 1.
 
-    def _build_seq2seq(self, split_idx):
-        output = self.input_splits[split_idx]
+    def _build_seq2seq(self, split_idx, mode):
+        if mode == 'training':
+            output = self.input_splits[split_idx]
+        elif mode == 'inference':
+            output = self.inference_input_ph
+        else:
+            raise ValueError('unknown mode')
+
         with tf.variable_scope('pretrain_effect_zone'):
             for i in range(self.nb_layers):
                 if i == 0:
@@ -144,7 +143,7 @@ class Predictor:
         encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
         # feature dim from BiLSTMEncoder is shape[-1] * 2
         decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
-                                                           self.nb_max_digits)
+                                                           self.nb_max_digits, )
 
         # auxiliary loss on length
         nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
@@ -153,18 +152,69 @@ class Predictor:
         # translation output
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
 
-        # lib.ops.Linear.linear('NBDigitsOutput', self.nb_max_digits * shape[-1] * 2,
-        #                                      self.nb_length_class,
-        #                                      tf.reshape(decoder_outputs, [-1, self.nb_max_digits * shape[-1] * 2]))
-
-        if not hasattr(self, 'output'):
-            self.output = [output]
-            self.mnist_output = [mnist_output]
-            self.nb_digits_output = [nb_digits_output]
+        if mode == 'training':
+            if not hasattr(self, 'output'):
+                self.output = [output]
+                self.mnist_output = [mnist_output]
+                self.nb_digits_output = [nb_digits_output]
+            else:
+                self.output += [output]
+                self.mnist_output += [mnist_output]
+                self.nb_digits_output += [nb_digits_output]
         else:
-            self.output += [output]
-            self.mnist_output += [mnist_output]
-            self.nb_digits_output += [nb_digits_output]
+            self.inference_output = output
+
+    def _build_beam_seq2seq(self, split_idx, mode):
+        '''experimental'''
+        if mode == 'training':
+            output = self.input_splits[split_idx]
+        elif mode == 'inference':
+            output = self.inference_input_ph
+        else:
+            raise ValueError('unknown mode')
+
+        with tf.variable_scope('pretrain_effect_zone'):
+            for i in range(self.nb_layers):
+                if i == 0:
+                    output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
+                                                    resample=None)
+                else:
+                    shape = output.get_shape().as_list()  # no downsampling
+                    output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
+                                      self.filter_size, output, 'down' if i % 2 == 1 else None,
+                                      self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
+
+            shape = output.get_shape().as_list()
+            output = tf.reshape(
+                tf.transpose(output, [0, 2, 1, 3]),
+                [-1, np.prod(shape[1:3]), shape[-1]])
+
+            mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
+                                                 tf.reshape(output, [-1, np.prod(shape[1:])]))
+
+        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
+        # feature dim from BiLSTMEncoder is shape[-1] * 2
+        decoder_outputs, decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states,
+                                                           self.nb_max_digits, self.nb_class)
+
+        # auxiliary loss on length
+        nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
+                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
+
+        # translation output
+        output = decoder_outputs
+
+        if mode == 'training':
+            if not hasattr(self, 'output'):
+                self.output = [output]
+                self.mnist_output = [mnist_output]
+                self.nb_digits_output = [nb_digits_output]
+            else:
+                self.output += [output]
+                self.mnist_output += [mnist_output]
+                self.nb_digits_output += [nb_digits_output]
+        else:
+            self.inference_output = output
 
     def _loss(self, type, split_idx):
         if type == 'CE':
@@ -239,9 +289,9 @@ class Predictor:
             self.length_cost += [length_cost]
 
     def _train(self, split_idx):
-        gv = self.optimizer.compute_gradients(self.cost[split_idx] + 0.1 * self.length_cost[split_idx]
+        gv = self.optimizer.compute_gradients(self.cost[split_idx] + self.length_obj_ratio * self.length_cost[split_idx]
                                               , var_list=[var for var in tf.trainable_variables() if
-                                                          'mnist_output' not in var.name])  # and 'NBDigitsOutput' not in var.name])
+                                                          'mnist_output' not in var.name])  # and 'NBDigits' not in var.name])
 
         mnist_gv = self.mnist_pretrain_optimizer.compute_gradients(self.mnist_cost[split_idx]
                                                                    , var_list=[var for var in tf.trainable_variables()
@@ -426,6 +476,8 @@ class Predictor:
                 self.sess.run(self.train_op,
                               feed_dict={self.input_ph: _data,
                                          self.labels: _labels,
+                                         self.global_step: i,
+                                         self.hf_iters_per_epoch: iters_per_epoch // 2,
                                          self.nb_digits_labels: _length_labels,
                                          self.is_training_ph: True}
                               )
@@ -511,9 +563,9 @@ class Predictor:
                 self.sess.run(self.train_op,
                               feed_dict={self.input_ph: _data,
                                          self.labels: _labels,
+                                         self.global_step: i,
+                                         self.hf_iters_per_epoch: iters_per_epoch // 2,
                                          self.nb_digits_labels: _labels_len,
-                                         self.lr_multiplier: lib.clr.cyclic_learning_rate(i, 0.1, 10., iters_per_epoch),
-                                         # self.lr_multiplier: 1. - i / (epochs * iters_per_epoch) - epoch / epochs,
                                          self.is_training_ph: True}
                               )
 
@@ -564,16 +616,10 @@ class Predictor:
             all_length_cost += _length_cost * _data.shape[0]
         return all_cost / len(X), all_char_acc / len(X), all_sample_acc / len(X), all_length_cost / len(X)
 
-    def predict(self, X, batch_size):
-        all_predictions = []
-        iters_per_epoch = len(X) // batch_size + (0 if len(X) % batch_size == 0 else 1)
-        for i in range(iters_per_epoch):
-            _data = X[i * batch_size: (i + 1) * batch_size]
-            _prediction = self.sess.run(self.prediction,
-                                        {self.input_ph: _data,
-                                         self.is_training_ph: False})
-            all_predictions.append(_prediction)
-        return np.concatenate(all_predictions, axis=0)
+    def predict(self, X):
+        return self.sess.run(self.inference_output,
+                             {self.inference_input_ph: X,
+                              self.is_training_ph: False})
 
     def delete(self):
         self.sess.close()

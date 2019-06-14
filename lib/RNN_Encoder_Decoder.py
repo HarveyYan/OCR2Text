@@ -72,13 +72,58 @@ def AttentionDecoder(name, encoder_outputs, encoder_states, length):
         def body(i, output, state, input):
             cell_output, state = cell(input, state)
             # attention ( cell_output, encoder_outputs)
-            attention_vector = Attention('ATT', encoder_outputs, cell_output)
+            attention_vector = Attention('DecoderATT', encoder_outputs, cell_output)
             output = output.write(i, attention_vector)
             return [tf.add(i, 1), output, state, attention_vector]
 
         _, output, state, att_vec = tf.while_loop(while_condition, body, [i, output, encoder_states, start_token])
         output = tf.transpose(output.stack(), [1, 0, 2])
         return output, state
+
+
+def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
+                   teacher_forced_output=None, mode='training'):
+    '''
+    At training stage, teaching forcing can be enabled or disabled depending on
+    if teacher_forced_output argument has been specified a tensor.
+
+    At inference stage, teacher_forced_output must be disabled, and a beam searcher will be employed to
+    extract top-k hypothesis.
+
+    For most of the time, teacher_forced_output feature is disabled. Might be fun to try it someday...
+    '''
+    hidden_units = encoder_states[0].get_shape().as_list()[-1]
+    if mode == 'training':
+        print('hidden units in the decoder %d, same as the encoder' % (hidden_units))
+        with tf.variable_scope(name):
+            cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
+            # output stores the probability logits given by the lstm projection
+            output = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True)
+            start_token = tf.zeros((tf.shape(encoder_states[0])[0], nb_emb))
+
+            # unroll
+            i = tf.constant(0)
+            while_condition = lambda i, _1, _2, _3: tf.less(i, length)
+
+            def body(i, output, state, input):
+                cell_output, state = cell(input, state)
+                # attention ( cell_output, encoder_outputs), output with dimension nb_emb
+                attention_vector = Attention('DecoderATT', encoder_outputs, cell_output)
+                logits_vector = linear('Logits', hidden_units, nb_emb, attention_vector)
+                if teacher_forced_output is None:
+                    token = tf.one_hot(tf.multinomial(logits_vector, 1)[:, 0], nb_emb)
+                else:
+                    token = teacher_forced_output[:, i, :]
+                # token = tf.concat([attention_vector, token], axis=-1) # concatenate the token with attention_vector
+                output = output.write(i, logits_vector)
+                return [tf.add(i, 1), output, state, token]
+
+            _, output, state, att_vec = tf.while_loop(while_condition, body, [i, output, encoder_states, start_token])
+            output = tf.transpose(output.stack(), [1, 0, 2])
+            return output, state
+    elif mode == 'inference':
+        '''add beam search for inference when it's ready'''
+        raise Exception('Not there yet!')
 
 
 def Attention(name, encoder_outputs, cell_output):

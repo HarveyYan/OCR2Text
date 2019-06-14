@@ -16,6 +16,9 @@ tf.app.flags.DEFINE_integer('epochs', 200, '')
 tf.app.flags.DEFINE_integer('nb_gpus', 1, '')
 tf.app.flags.DEFINE_integer('digits_limits', 8, '')
 tf.app.flags.DEFINE_bool('use_cross_validation', False, '')
+tf.app.flags.DEFINE_bool('use_clr', True, '')
+tf.app.flags.DEFINE_bool('use_momentum', False, '')
+tf.app.flags.DEFINE_float('length_obj_ratio', 0.1, '')
 FLAGS = tf.app.flags.FLAGS
 
 BATCH_SIZE = 200 * FLAGS.nb_gpus  if FLAGS.nb_gpus > 0 else 200
@@ -34,8 +37,12 @@ nb_layers = 8
 filter_size = 3
 output_dim = 16
 learning_rate = 2e-4
+use_clr = FLAGS.use_clr
+use_momentum = FLAGS.use_momentum
+length_obj_ratio = FLAGS.length_obj_ratio
 
-HParams = ['arch', 'use_bn', 'use_lstm', 'nb_layers', 'filter_size', 'output_dim', 'learning_rate']
+HParams = ['arch', 'use_bn', 'use_lstm', 'nb_layers', 'filter_size', 'output_dim',
+           'learning_rate', 'use_clr', 'use_momentum', 'length_obj_ratio']
 metrics = ['cost', 'char_acc', 'sample_acc']
 hp = {}
 for param in HParams:
@@ -103,7 +110,7 @@ else:
 
 
 all_expr_images, all_expr_ids = lib.dataloader.load_expr_data()
-predictions = model.predict(all_expr_images, BATCH_SIZE)
+predictions = model.predict(all_expr_images)
 
 outfile = open(os.path.join(output_dir, 'validation_set_values.txt'), 'w')
 outfile.write('filename;value\n')
