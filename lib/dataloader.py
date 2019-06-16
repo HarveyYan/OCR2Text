@@ -19,7 +19,7 @@ max_size = None
 max_target_length = None
 image_load_func = None
 digits_limit = 10
-
+nb_channels = 1
 
 def determine_largest_size(path_images):
     max_size = [0, 0]
@@ -36,7 +36,7 @@ def load_and_preprocess_image(path_images):
         raise ValueError('Need to determine a consensus size!')
     all_images = []
     for img_ph in path_images:
-        img_data = cv2.imread(img_ph)[:, :, :1] // 255.
+        img_data = cv2.imread(img_ph)[:, :, :nb_channels] / 255.
         size = list(img_data.shape)
 
         if size[0] != max_size[0]: # height

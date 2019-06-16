@@ -63,22 +63,27 @@ def AttentionDecoder(name, encoder_outputs, encoder_states, length):
     with tf.variable_scope(name):
         cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
         output = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True)
+        att_weights = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True)
         start_token = tf.zeros((tf.shape(encoder_states[0])[0], hidden_units))
 
         # unroll
         i = tf.constant(0)
-        while_condition = lambda i, _1, _2, _3: tf.less(i, length)
+        while_condition = lambda i, _1, _2, _3, _4: tf.less(i, length)
 
-        def body(i, output, state, input):
+        def body(i, output, att_weights, state, input):
             cell_output, state = cell(input, state)
             # attention ( cell_output, encoder_outputs)
-            attention_vector = Attention('DecoderATT', encoder_outputs, cell_output)
+            attention_vector, attention_weights = \
+                Attention('DecoderATT', encoder_outputs, cell_output)
             output = output.write(i, attention_vector)
-            return [tf.add(i, 1), output, state, attention_vector]
+            att_weights = att_weights.write(i, attention_weights)
+            return [tf.add(i, 1), output, att_weights, state, attention_vector]
 
-        _, output, state, att_vec = tf.while_loop(while_condition, body, [i, output, encoder_states, start_token])
+        _, output, att_weights, state, att_vec = tf.while_loop(while_condition, body,
+                                                              [i, output, att_weights, encoder_states, start_token])
         output = tf.transpose(output.stack(), [1, 0, 2])
-        return output, state
+        att_weights = tf.transpose(att_weights.stack(), [1, 0, 2], name='stack_att_weights')
+        return output, state, att_weights
 
 
 def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
@@ -108,7 +113,7 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
             def body(i, output, state, input):
                 cell_output, state = cell(input, state)
                 # attention ( cell_output, encoder_outputs), output with dimension nb_emb
-                attention_vector = Attention('DecoderATT', encoder_outputs, cell_output)
+                attention_vector, _ = Attention('DecoderATT', encoder_outputs, cell_output)
                 logits_vector = linear('Logits', hidden_units, nb_emb, attention_vector)
                 if teacher_forced_output is None:
                     token = tf.one_hot(tf.multinomial(logits_vector, 1)[:, 0], nb_emb)
@@ -135,11 +140,11 @@ def Attention(name, encoder_outputs, cell_output):
         attention_weights = tf.nn.softmax(scores, axis=-1)
         context_vector = tf.reduce_sum(encoder_outputs * attention_weights[:, :, None], axis=1)
         return tf.nn.tanh(linear('ATT_vector', input_dim * 2, input_dim,
-                                 tf.concat([context_vector, cell_output], axis=-1)))
+                                 tf.concat([context_vector, cell_output], axis=-1))), attention_weights
 
 
 if __name__ == "__main__":
     encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', 128, tf.random_normal((200, 32, 4)), 32)
-    decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 32)
+    decoder_outputs, decoder_states, _ = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 32)
 
     print(decoder_outputs.get_shape().as_list())

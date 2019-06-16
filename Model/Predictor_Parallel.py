@@ -63,14 +63,14 @@ class Predictor:
                         raise Exception('baseline disabled (constructing CTC)')
                         # self._build_residual_classifier(i)
                     else:
-                        # self._build_seq2seq(i, mode='training')
-                        self._build_beam_seq2seq(i, mode='training')
+                        self._build_seq2seq(i, mode='training')
+                        # self._build_beam_seq2seq(i, mode='training')
                     self._loss('CE' if self.nb_class > 1 else 'MSE', i)
                     self._train(i)
 
             with tf.device(self.gpu_device_list[0]), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
-                # self._build_seq2seq(i, None, mode='inference')
-                self._build_beam_seq2seq(None, mode='inference')
+                self._build_seq2seq(None, mode='inference')
+                # self._build_beam_seq2seq(None, mode='inference')
 
             self._merge()
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
@@ -127,11 +127,12 @@ class Predictor:
                     output = OptimizedResBlockDisc1(output, self.nb_emb, self.output_dim,
                                                     resample=None)
                 else:
-                    shape = output.get_shape().as_list()  # no downsampling
+                    shape = output.get_shape().as_list()
                     output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
                                       self.filter_size, output, 'down' if i % 2 == 1 else None,
                                       self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
+            output = tf.nn.relu(output)
             shape = output.get_shape().as_list()
             output = tf.reshape(
                 tf.transpose(output, [0, 2, 1, 3]),
@@ -140,14 +141,14 @@ class Predictor:
             mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
                                                  tf.reshape(output, [-1, np.prod(shape[1:])]))
 
-        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
-        # feature dim from BiLSTMEncoder is shape[-1] * 2
-        decoder_outputs, decoder_states = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
-                                                           self.nb_max_digits, )
-
         # auxiliary loss on length
         nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
-                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
+                                                 tf.reduce_sum(output, axis=1))
+
+        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
+        # feature dim from BiLSTMEncoder is shape[-1] * 2
+        decoder_outputs, decoder_states, att_weights = AttentionDecoder('Decoder', encoder_outputs, encoder_states,
+                                                           self.nb_max_digits, )
 
         # translation output
         output = lib.ops.Linear.linear('MapToOutputEmb', shape[-1] * 2, self.nb_class, decoder_outputs)
@@ -163,6 +164,7 @@ class Predictor:
                 self.nb_digits_output += [nb_digits_output]
         else:
             self.inference_output = output
+            self.inference_att_weights = att_weights
 
     def _build_beam_seq2seq(self, split_idx, mode):
         '''experimental'''
@@ -586,8 +588,8 @@ class Predictor:
             lib.plot.flush()
             lib.plot.tick()
 
-            if dev_cost < best_dev_cost:
-                best_dev_cost = dev_cost
+            if dev_cost + dev_length_cost * self.length_obj_ratio < best_dev_cost:
+                best_dev_cost = dev_cost + dev_length_cost * self.length_obj_ratio
                 save_path = self.saver.save(self.sess, checkpoints_dir, global_step=epoch)
                 print('Validation sample acc improved. Saved to path %s\n' % (save_path), flush=True)
             else:

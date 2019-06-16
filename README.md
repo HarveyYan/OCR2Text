@@ -29,6 +29,11 @@ We investigated a little bit of image data proprocessing, i.e. segmentation and 
 Image augmentation, which is simply converting images to grey-scale, has added a lot of benefits.
 Segmentation on the other hand didn't go very well... 
 
+## Things I have learnt
+
+- jupyter notebook is a great tool for visualization and demonstration.
+- It's important to do sanity checks, especially to check the data preprocessing pipeline. 
+
 ## Collaborators
 
 Thanks a lot! [Shiquan](https://github.com/zsq007) and [Helen](https://github.com/HelenYou).
