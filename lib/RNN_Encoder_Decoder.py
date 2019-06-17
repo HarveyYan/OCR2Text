@@ -132,10 +132,10 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
         with tf.variable_scope(name, reuse=True):
             cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
             batch_size = tf.shape(encoder_states[0])[0]
-            # output stores the probability logits given by the lstm projection
+            # tensorflow tensorarray only allows writing once at each position...
             beam_tokens = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True,
                                          clear_after_read=False)
-            # tensorflow tensorarray forces to write once.
+
             start_token = tf.zeros((batch_size, nb_emb))  # [batch_size, nb_emb]
             index_base = tf.reshape(
                 tf.tile(tf.expand_dims(tf.range(batch_size) * beam_size, axis=1), [1, beam_size]),
@@ -145,9 +145,9 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
             def update_func(j, beam_tokens, real_path, i):
                 # todo double check
                 # j = tf.Print(j, [j])
-                updates = tf.gather(beam_tokens.read(j+i*(i-1)//2), real_path)
-                updates = tf.Print(updates, [tf.shape(updates)])
-                beam_tokens = beam_tokens.write(j+i*(i+1)//2, updates)
+                updates = tf.gather(beam_tokens.read(j + i * (i - 1) // 2), real_path)
+                # updates = tf.Print(updates, [tf.shape(updates)])
+                beam_tokens = beam_tokens.write(j + i * (i + 1) // 2, updates)
                 # beam_tokens = beam_tokens.write(j, tf.gather(updates, real_path))
                 return [tf.add(j, 1), beam_tokens, real_path, i]
 
@@ -156,8 +156,6 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
             while_condition = lambda i, _1, _2, _3, _4, _5: tf.less(i, length)
 
             def body(i, beam_tokens, encoder_outputs, state, input, marginal_logprob):
-                # print(input.get_shape().as_list())
-                # print(state[0].get_shape().as_list())
                 cell_output, state = cell(input, state)
 
                 # attention ( cell_output, encoder_outputs), output with dimension nb_emb
@@ -173,7 +171,6 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                                            lambda: conditional_logprob,
                                            lambda: conditional_logprob + marginal_logprob[:, None])
 
-                # marginal_logprob = tf.Print(marginal_logprob, [tf.shape(marginal_logprob)])
                 # log p(x_{r1} | ...)
                 # reshape to [batch_size, beam_size * nb_emb],
                 # then select beam_size hypothesis from each batch, leading to [batch_size, beam_size]
@@ -202,12 +199,13 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                                      ((batch_size * beam_size, hidden_units))),
                     ),
                     lambda: tf.nn.rnn_cell.LSTMStateTuple(
+                        # need to double check this part but I think it's correct
                         c=tf.gather(state[0], real_path),
                         h=tf.gather(state[1], real_path),
                     )
                 )
 
-                encoder_outputs = tf.cond(
+                encoder_outputs = tf.cond( # same within a batch
                     tf.less(i, 1),
                     lambda: tf.reshape(tf.stack([encoder_outputs] * beam_size, axis=1),
                                        ((batch_size * beam_size, length, hidden_units))),
@@ -217,12 +215,12 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                 token = tf.reshape(tf.one_hot(token_index, depth=nb_emb), (-1, nb_emb))
                 # [batch_size * beam_size, nb_emb]
 
-
                 j = tf.constant(0)
                 update_condtion = lambda j, *args: tf.less(j, i)
-                _, beam_tokens, _, _ = tf.while_loop(update_condtion, update_func, [j, beam_tokens, real_path, i],
-                                                  parallel_iterations=1)
-                beam_tokens = beam_tokens.write(i*(i+3)//2, token)
+                _, beam_tokens, _, _ = tf.while_loop(update_condtion, update_func,
+                                                     [j, beam_tokens, real_path, i],
+                                                     parallel_iterations=1)
+                beam_tokens = beam_tokens.write(i * (i + 3) // 2, token)
                 return [tf.add(i, 1), beam_tokens, encoder_outputs, state, token, marginal_logprob]
 
             _, beam_tokens, encoder_outputs, state, att_vec, marginal_logprob = \
@@ -235,7 +233,7 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                                                                               h=tf.TensorShape((None, None))),
                                                 tf.TensorShape((None, nb_emb)), tf.TensorShape((None,))])
 
-            beam_tokens = tf.transpose(beam_tokens.stack(), [1, 0, 2])[:,-length:,:]
+            beam_tokens = tf.transpose(beam_tokens.stack(), [1, 0, 2])[:, -length:, :]
 
             return (beam_tokens, marginal_logprob), state
 
@@ -257,10 +255,3 @@ if __name__ == "__main__":
     BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4)
     (beam_tokens, marginal_logprob), decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4,
                                                                      mode='inference', beam_size=2)
-
-    sess = tf.Session()
-    sess.run(tf.global_variables_initializer())
-
-    res = sess.run([beam_tokens, marginal_logprob])
-    print(res[0].shape)
-    print(res[1].shape)
