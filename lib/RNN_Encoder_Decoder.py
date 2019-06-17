@@ -80,14 +80,14 @@ def AttentionDecoder(name, encoder_outputs, encoder_states, length):
             return [tf.add(i, 1), output, att_weights, state, attention_vector]
 
         _, output, att_weights, state, att_vec = tf.while_loop(while_condition, body,
-                                                              [i, output, att_weights, encoder_states, start_token])
+                                                               [i, output, att_weights, encoder_states, start_token])
         output = tf.transpose(output.stack(), [1, 0, 2])
         att_weights = tf.transpose(att_weights.stack(), [1, 0, 2], name='stack_att_weights')
         return output, state, att_weights
 
 
 def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
-                   teacher_forced_output=None, mode='training'):
+                   teacher_forced_output=None, mode='training', beam_size=5):
     '''
     At training stage, teaching forcing can be enabled or disabled depending on
     if teacher_forced_output argument has been specified a tensor.
@@ -127,8 +127,120 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
             output = tf.transpose(output.stack(), [1, 0, 2])
             return output, state
     elif mode == 'inference':
-        '''add beam search for inference when it's ready'''
-        raise Exception('Not there yet!')
+        print('Inference uses beam search with width %d' % (beam_size))
+        # Imperative to keep the names the same for the training stage
+        with tf.variable_scope(name, reuse=True):
+            cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
+            batch_size = tf.shape(encoder_states[0])[0]
+            # output stores the probability logits given by the lstm projection
+            beam_tokens = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True)
+            start_token = tf.zeros((batch_size, nb_emb))  # [batch_size, nb_emb]
+            index_base = tf.reshape(
+                tf.tile(tf.expand_dims(tf.range(batch_size) * beam_size, axis=1), [1, beam_size]),
+                [-1])  # [batch_size * beam_size, ]
+
+            # nested while loop for updating old tokens ...
+            def update_func(j, beam_tokens, real_path):
+                # todo double check
+                # j = tf.Print(j, [j])
+                updates = tf.gather(beam_tokens.read(j), real_path)
+                beam_tokens = beam_tokens.write(j, updates)
+                # beam_tokens = beam_tokens.write(j, tf.gather(updates, real_path))
+                return [tf.add(j, 1), beam_tokens, real_path]
+
+            # unroll
+            i = tf.constant(0)
+            while_condition = lambda i, _1, _2, _3, _4, _5: tf.less(i, length)
+
+            def body(i, beam_tokens, encoder_outputs, state, input, marginal_logprob):
+                # print(input.get_shape().as_list())
+                # print(state[0].get_shape().as_list())
+                cell_output, state = cell(input, state)
+
+                # attention ( cell_output, encoder_outputs), output with dimension nb_emb
+                attention_vector, _ = Attention('DecoderATT', encoder_outputs, cell_output)
+                logits_vector = linear('Logits', hidden_units, nb_emb, attention_vector)
+
+                # log p(x_i | x_{i-1}, .., x_1)
+                conditional_logprob = tf.nn.log_softmax(logits_vector)  # [batch_size * beam_size, nb_emb]
+
+                # log p(x_i, x_{i-1}, .., x_1) = log p(x_i | x_{i-1}, .., x_1) + log p(x_{i-1}, .., x_1)
+                # dynamic programming
+                marginal_logprob = tf.cond(tf.less(i, 1),
+                                           lambda: conditional_logprob,
+                                           lambda: conditional_logprob + marginal_logprob[:,
+                                                                         None])  # [batch_size * beam_size, nb_emb]
+
+                # marginal_logprob = tf.Print(marginal_logprob, [tf.shape(marginal_logprob)])
+                # log p(x_{r1} | ...)
+                # reshape to [batch_size, beam_size * nb_emb],
+                # then select beam_size hypothesis from each batch, leading to [batch_size, beam_size]
+                best_prob, best_idx = tf.nn.top_k(
+                    tf.reshape(marginal_logprob, (batch_size, -1)), beam_size
+                    # note, mixing all the beams here, [batch_size, beam_size * nb_emb]
+                )
+                # print(best_prob.get_shape().as_list())
+
+                best_prob = tf.reshape(best_prob, (-1, ))
+                best_idx = tf.reshape(best_idx, (-1, ))
+                beam_index = best_idx // nb_emb  # beam index where the token comes from, [batch_size * beam_size]
+                token_index = best_idx % nb_emb  # token index inside the beam
+                real_path = index_base + beam_index
+
+                # update marginal_logprob
+                marginal_logprob = best_prob
+                # tf.cond(tf.less(i, 1),
+                #                            lambda: best_prob,  # p(x_1), [batch_size * beam_size]
+                #                            lambda: tf.gather(best_prob, real_path)  # [batch_size * beam_size]
+                #                            )
+
+                # real_path = tf.Print(real_path, [tf.reduce_max(real_path)])
+                # update cell states
+                state = tf.cond(
+                    tf.less(i, 1),
+                    lambda: tf.nn.rnn_cell.LSTMStateTuple(
+                        c=tf.reshape(tf.stack([state[0]]*beam_size, axis=1), ((batch_size*beam_size, hidden_units))),
+                        h=tf.reshape(tf.stack([state[1]]*beam_size, axis=1), ((batch_size*beam_size, hidden_units))),
+                    ),
+                    lambda: tf.nn.rnn_cell.LSTMStateTuple(
+                        c=tf.gather(state[0], real_path),
+                        h=tf.gather(state[1], real_path),
+                    )
+                )
+
+                encoder_outputs = tf.cond(
+                    tf.less(i, 1),
+                    lambda: tf.reshape(tf.stack([encoder_outputs]*beam_size, axis=1), ((batch_size*beam_size, length, hidden_units))),
+                    lambda: encoder_outputs
+                )
+
+                # marginal_logprob = tf.reshape(marginal_logprob, (batch_size * beam_size,))
+
+                # real_beam_path = index_base + beam_index
+                token = tf.reshape(tf.one_hot(token_index, depth=nb_emb),
+                                   (-1, nb_emb))  # [batch_size * beam_size, nb_emb]
+                beam_tokens = beam_tokens.write(i, token)
+
+                j = tf.constant(0)
+                update_condtion = lambda j, _1, _2: tf.less(j, i)
+                _, beam_tokens, _ = tf.while_loop(update_condtion, update_func, [j, beam_tokens, real_path])
+
+                return [tf.add(i, 1), beam_tokens, encoder_outputs, state, token, marginal_logprob]
+
+
+
+            _, beam_tokens, encoder_outputs, state, att_vec, marginal_logprob = \
+                tf.while_loop(while_condition, body,
+                              loop_vars=[i, beam_tokens, encoder_outputs, encoder_states, start_token,
+                                         tf.zeros((batch_size * beam_size,))],
+                              shape_invariants=[tf.TensorShape(()), tf.TensorShape(()), tf.TensorShape((None, None, None)),
+                                                tf.nn.rnn_cell.LSTMStateTuple(c=tf.TensorShape((None, None)),
+                                                                              h=tf.TensorShape((None, None))),
+                                                tf.TensorShape((None, nb_emb)), tf.TensorShape((None,))])
+
+            beam_tokens = tf.transpose(beam_tokens.stack(), [1, 0, 2])
+
+            return (beam_tokens, marginal_logprob), state
 
 
 def Attention(name, encoder_outputs, cell_output):
@@ -144,7 +256,14 @@ def Attention(name, encoder_outputs, cell_output):
 
 
 if __name__ == "__main__":
-    encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', 128, tf.random_normal((200, 32, 4)), 32)
-    decoder_outputs, decoder_states, _ = AttentionDecoder('Decoder', encoder_outputs, encoder_states, 32)
+    encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', 128, tf.random_normal((200, 8, 4)), 8)
+    BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4)
+    (beam_tokens, marginal_logprob), decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4,
+                                                                     mode='inference', beam_size=2)
 
-    print(decoder_outputs.get_shape().as_list())
+    sess = tf.Session()
+    sess.run(tf.global_variables_initializer())
+
+    res = sess.run([beam_tokens, marginal_logprob])
+    print(res[0].shape)
+    print(res[1].shape)

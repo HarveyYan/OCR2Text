@@ -62,15 +62,21 @@ class Predictor:
                     if self.arch == 0:
                         raise Exception('baseline disabled (constructing CTC)')
                         # self._build_residual_classifier(i)
-                    else:
+                    elif self.arch == 1:
                         self._build_seq2seq(i, mode='training')
-                        # self._build_beam_seq2seq(i, mode='training')
+                    else:
+                        self._build_beam_seq2seq(i, mode='training')
                     self._loss('CE' if self.nb_class > 1 else 'MSE', i)
                     self._train(i)
 
             with tf.device(self.gpu_device_list[0]), tf.variable_scope('Classifier', reuse=tf.AUTO_REUSE):
-                self._build_seq2seq(None, mode='inference')
-                # self._build_beam_seq2seq(None, mode='inference')
+                if self.arch == 0:
+                    raise Exception('baseline disabled (constructing CTC)')
+                    # self._build_residual_classifier(i)
+                elif self.arch == 1:
+                    self._build_seq2seq(None, mode='inference')
+                else:
+                    self._build_beam_seq2seq(None, mode='inference')
 
             self._merge()
             self.mnist_pretrain_op = self.mnist_pretrain_optimizer.apply_gradients(self.mnist_gv)
@@ -114,6 +120,10 @@ class Predictor:
             self.lr_multiplier = 1.
 
     def _build_seq2seq(self, split_idx, mode):
+        '''
+        A fairly basic seq2seq without beam search
+        that passes attention vector to the next timestep at the decoding stage
+        '''
         if mode == 'training':
             output = self.input_splits[split_idx]
         elif mode == 'inference':
@@ -167,7 +177,10 @@ class Predictor:
             self.inference_att_weights = att_weights
 
     def _build_beam_seq2seq(self, split_idx, mode):
-        '''experimental'''
+        '''
+        a seq2seq that uses beam search at inference stage.
+        Only the sampled token is passed down to the next step at the inference stage.
+        '''
         if mode == 'training':
             output = self.input_splits[split_idx]
         elif mode == 'inference':
@@ -197,7 +210,7 @@ class Predictor:
         encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
         # feature dim from BiLSTMEncoder is shape[-1] * 2
         decoder_outputs, decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states,
-                                                           self.nb_max_digits, self.nb_class)
+                                                           self.nb_max_digits, self.nb_class, mode=mode)
 
         # auxiliary loss on length
         nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
@@ -216,7 +229,7 @@ class Predictor:
                 self.mnist_output += [mnist_output]
                 self.nb_digits_output += [nb_digits_output]
         else:
-            self.inference_output = output
+            self.inference_output = output # [0]: beam tokens, [1] marginal logprob
 
     def _loss(self, type, split_idx):
         if type == 'CE':
