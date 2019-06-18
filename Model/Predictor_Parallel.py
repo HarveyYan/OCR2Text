@@ -39,6 +39,7 @@ class Predictor:
         self.use_clr = kwargs.get('use_clr', False)
         self.use_momentum = kwargs.get('use_momentum', False)
         self.length_obj_ratio = kwargs.get('length_obj_ratio', 0.1)
+        self.beam_size = kwargs.get('beam_size', 5)
 
         self.g = tf.get_default_graph()
         with self.g.as_default():
@@ -139,7 +140,7 @@ class Predictor:
                 else:
                     shape = output.get_shape().as_list()
                     output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
-                                      self.filter_size, output, 'down' if i % 2 == 1 else None,
+                                      self.filter_size, output, self.resample if i % 2 == 1 else None,
                                       self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
             output = tf.nn.relu(output)
@@ -196,9 +197,10 @@ class Predictor:
                 else:
                     shape = output.get_shape().as_list()  # no downsampling
                     output = resblock('ResBlock%d' % (i), shape[-1], shape[-1] * 2 if i % 2 == 1 else shape[-1],
-                                      self.filter_size, output, 'down' if i % 2 == 1 else None,
+                                      self.filter_size, output, self.resample if i % 2 == 1 else None,
                                       self.is_training_ph, use_bn=self.use_bn, r=self.residual_connection)
 
+            output = tf.nn.relu(output)
             shape = output.get_shape().as_list()
             output = tf.reshape(
                 tf.transpose(output, [0, 2, 1, 3]),
@@ -207,14 +209,14 @@ class Predictor:
             mnist_output = lib.ops.Linear.linear('mnist_output', np.prod(shape[1:]), self.nb_mnist_class,
                                                  tf.reshape(output, [-1, np.prod(shape[1:])]))
 
-        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
-        # feature dim from BiLSTMEncoder is shape[-1] * 2
-        decoder_outputs, decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states,
-                                                           self.nb_max_digits, self.nb_class, mode=mode)
-
         # auxiliary loss on length
         nb_digits_output = lib.ops.Linear.linear('NBDigitsLinear', shape[-1], self.nb_length_class,
-                                                 lib.ops.LSTM.attention('NBDigitsATT', shape[-1], output))
+                                                 tf.reduce_sum(output, axis=1))
+
+        encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', shape[-1], output, np.prod(shape[1:3]))
+        # feature dim from BiLSTMEncoder is shape[-1] * 2
+        decoder_outputs, decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states, self.nb_max_digits,
+                                                         self.nb_class, mode=mode, beam_size=self.beam_size)
 
         # translation output
         output = decoder_outputs
@@ -229,7 +231,7 @@ class Predictor:
                 self.mnist_output += [mnist_output]
                 self.nb_digits_output += [nb_digits_output]
         else:
-            self.inference_output = output # [0]: beam tokens, [1] marginal logprob
+            self.inference_output = output # [0]: beam tokens, [1] marginal logprob, [2] attention_weights
 
     def _loss(self, type, split_idx):
         if type == 'CE':

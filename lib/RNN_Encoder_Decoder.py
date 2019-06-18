@@ -102,7 +102,6 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
         print('hidden units in the decoder %d, same as the encoder' % (hidden_units))
         with tf.variable_scope(name):
             cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
-            # output stores the probability logits given by the lstm projection
             output = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True)
             start_token = tf.zeros((tf.shape(encoder_states[0])[0], nb_emb))
 
@@ -112,14 +111,13 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
 
             def body(i, output, state, input):
                 cell_output, state = cell(input, state)
-                # attention ( cell_output, encoder_outputs), output with dimension nb_emb
                 attention_vector, _ = Attention('DecoderATT', encoder_outputs, cell_output)
                 logits_vector = linear('Logits', hidden_units, nb_emb, attention_vector)
                 if teacher_forced_output is None:
                     token = tf.one_hot(tf.multinomial(logits_vector, 1)[:, 0], nb_emb)
                 else:
                     token = teacher_forced_output[:, i, :]
-                # token = tf.concat([attention_vector, token], axis=-1) # concatenate the token with attention_vector
+                # token = tf.concat([attention_vector, token], axis=-1)
                 output = output.write(i, logits_vector)
                 return [tf.add(i, 1), output, state, token]
 
@@ -128,12 +126,13 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
             return output, state
     elif mode == 'inference':
         print('Inference uses beam search with width %d' % (beam_size))
-        # Imperative to keep the names the same for the training stage
+        # Imperative to keep the names the same as in the training stage
         with tf.variable_scope(name, reuse=True):
             cell = tf.nn.rnn_cell.LSTMCell(hidden_units, name='decoder_lstm_cell')
             batch_size = tf.shape(encoder_states[0])[0]
-            # tensorflow tensorarray only allows writing once at each position...
             beam_tokens = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True,
+                                         clear_after_read=False)
+            att_weights = tf.TensorArray(tf.float32, size=length, infer_shape=True, dynamic_size=True,
                                          clear_after_read=False)
 
             start_token = tf.zeros((batch_size, nb_emb))  # [batch_size, nb_emb]
@@ -141,25 +140,33 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                 tf.tile(tf.expand_dims(tf.range(batch_size) * beam_size, axis=1), [1, beam_size]),
                 [-1])  # [batch_size * beam_size, ]
 
-            # nested while loop for updating old tokens ...
-            def update_func(j, beam_tokens, real_path, i):
-                # todo double check
-                # j = tf.Print(j, [j])
+            # nested while loop for updating old tokens
+            def update_func(j, beam_tokens, att_weights, real_path, i):
+                """
+                Tensorflow tensorarray only allows writing once at each position.
+                Therefore updates to old tokens are appended to the array instead of modifying inplace
+                :param j: index of the old tokens to be modified
+                :param beam_tokens: a tensorarray object storing old tokens of size (i+1)*i/2
+                :param att_weights: a tensorarray object storing attention weights
+                :param real_path: update the old tokens with current beam index
+                :param i: index of the current token
+                :return:
+                """
                 updates = tf.gather(beam_tokens.read(j + i * (i - 1) // 2), real_path)
-                # updates = tf.Print(updates, [tf.shape(updates)])
                 beam_tokens = beam_tokens.write(j + i * (i + 1) // 2, updates)
-                # beam_tokens = beam_tokens.write(j, tf.gather(updates, real_path))
-                return [tf.add(j, 1), beam_tokens, real_path, i]
+                updates_attw = tf.gather(att_weights.read(j + i * (i - 1) // 2), real_path)
+                att_weights = att_weights.write(j + i * (i + 1) // 2, updates_attw)
+                return [tf.add(j, 1), beam_tokens, att_weights, real_path, i]
 
             # unroll
             i = tf.constant(0)
-            while_condition = lambda i, _1, _2, _3, _4, _5: tf.less(i, length)
+            while_condition = lambda i, *args: tf.less(i, length)
 
-            def body(i, beam_tokens, encoder_outputs, state, input, marginal_logprob):
+            def body(i, beam_tokens, att_weights, encoder_outputs, state, input, marginal_logprob):
                 cell_output, state = cell(input, state)
 
-                # attention ( cell_output, encoder_outputs), output with dimension nb_emb
-                attention_vector, _ = Attention('DecoderATT', encoder_outputs, cell_output)
+                # attention (cell_output, encoder_outputs), output has dimension nb_emb
+                attention_vector, attention_weights = Attention('DecoderATT', encoder_outputs, cell_output)
                 logits_vector = linear('Logits', hidden_units, nb_emb, attention_vector)
 
                 # log p(x_i | x_{i-1}, .., x_1)
@@ -186,7 +193,7 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                 token_index = best_idx % nb_emb  # token index inside the beam
                 real_path = index_base + beam_index
 
-                # update marginal_logprob
+                # best marginal_logprob
                 marginal_logprob = best_prob
 
                 # update cell states
@@ -205,11 +212,11 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                     )
                 )
 
-                encoder_outputs = tf.cond( # same within a batch
+                encoder_outputs = tf.cond(
                     tf.less(i, 1),
                     lambda: tf.reshape(tf.stack([encoder_outputs] * beam_size, axis=1),
                                        ((batch_size * beam_size, -1, hidden_units))),
-                    lambda: encoder_outputs
+                    lambda: encoder_outputs # it's always the same between hypothesis of a sample
                 )
 
                 token = tf.reshape(tf.one_hot(token_index, depth=nb_emb), (-1, nb_emb))
@@ -217,25 +224,33 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
 
                 j = tf.constant(0)
                 update_condtion = lambda j, *args: tf.less(j, i)
-                _, beam_tokens, _, _ = tf.while_loop(update_condtion, update_func,
-                                                     [j, beam_tokens, real_path, i],
-                                                     parallel_iterations=1)
+                _, beam_tokens, att_weights, _, _ = tf.while_loop(update_condtion, update_func,
+                                                                  [j, beam_tokens, att_weights, real_path, i],
+                                                                  parallel_iterations=1)
                 beam_tokens = beam_tokens.write(i * (i + 3) // 2, token)
-                return [tf.add(i, 1), beam_tokens, encoder_outputs, state, token, marginal_logprob]
 
-            _, beam_tokens, encoder_outputs, state, att_vec, marginal_logprob = \
+                attention_weights = tf.cond(tf.less(i, 1),
+                                            lambda: tf.reshape(tf.stack([attention_weights] * beam_size, axis=1),
+                                                               ((batch_size * beam_size, -1))),
+                                            lambda: tf.gather(attention_weights, real_path),
+                                            )
+
+                att_weights = att_weights.write(i * (i + 3) // 2, attention_weights)
+                return [tf.add(i, 1), beam_tokens, att_weights, encoder_outputs, state, token, marginal_logprob]
+
+            _, beam_tokens, att_weights, encoder_outputs, state, att_vec, marginal_logprob = \
                 tf.while_loop(while_condition, body,
-                              loop_vars=[i, beam_tokens, encoder_outputs, encoder_states, start_token,
-                                         tf.zeros((batch_size * beam_size,))],
-                              shape_invariants=[tf.TensorShape(()), tf.TensorShape(()),
+                              loop_vars=[i, beam_tokens, att_weights, encoder_outputs, encoder_states,
+                                         start_token, tf.zeros((batch_size * beam_size,))],
+                              shape_invariants=[tf.TensorShape(()), tf.TensorShape(()), tf.TensorShape(()),
                                                 tf.TensorShape((None, None, hidden_units)),
                                                 tf.nn.rnn_cell.LSTMStateTuple(c=tf.TensorShape((None, hidden_units)),
                                                                               h=tf.TensorShape((None, hidden_units))),
                                                 tf.TensorShape((None, nb_emb)), tf.TensorShape((None,))])
 
             beam_tokens = tf.transpose(beam_tokens.stack(), [1, 0, 2])[:, -length:, :]
-
-            return (beam_tokens, marginal_logprob), state
+            att_weights = tf.transpose(att_weights.stack(), [1, 0, 2])[:, -length:, :]
+            return (beam_tokens, marginal_logprob, att_weights), state
 
 
 def Attention(name, encoder_outputs, cell_output):
@@ -251,7 +266,13 @@ def Attention(name, encoder_outputs, cell_output):
 
 
 if __name__ == "__main__":
-    encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', 128, tf.random_normal((200, 8, 4)), 8)
+    encoder_outputs, encoder_states = BiLSTMEncoder('Encoder', 128, tf.random_normal((200, 12, 4)), 12)
     BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4)
-    (beam_tokens, marginal_logprob), decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4,
-                                                                     mode='inference', beam_size=2)
+    res, decoder_states = BeamAttDecoder('Decoder', encoder_outputs, encoder_states, 8, 4,
+                                         mode='inference', beam_size=2)
+    sess = tf.Session()
+    sess.run(tf.global_variables_initializer())
+    beam_tokens, marginal_logprob, att_weights = sess.run(res)
+    print(beam_tokens.shape)
+    print(marginal_logprob.shape)
+    print(att_weights.shape)
