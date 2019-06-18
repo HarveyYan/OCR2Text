@@ -208,7 +208,7 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                 encoder_outputs = tf.cond( # same within a batch
                     tf.less(i, 1),
                     lambda: tf.reshape(tf.stack([encoder_outputs] * beam_size, axis=1),
-                                       ((batch_size * beam_size, length, hidden_units))),
+                                       ((batch_size * beam_size, -1, hidden_units))),
                     lambda: encoder_outputs
                 )
 
@@ -228,9 +228,9 @@ def BeamAttDecoder(name, encoder_outputs, encoder_states, length, nb_emb,
                               loop_vars=[i, beam_tokens, encoder_outputs, encoder_states, start_token,
                                          tf.zeros((batch_size * beam_size,))],
                               shape_invariants=[tf.TensorShape(()), tf.TensorShape(()),
-                                                tf.TensorShape((None, None, None)),
-                                                tf.nn.rnn_cell.LSTMStateTuple(c=tf.TensorShape((None, None)),
-                                                                              h=tf.TensorShape((None, None))),
+                                                tf.TensorShape((None, None, hidden_units)),
+                                                tf.nn.rnn_cell.LSTMStateTuple(c=tf.TensorShape((None, hidden_units)),
+                                                                              h=tf.TensorShape((None, hidden_units))),
                                                 tf.TensorShape((None, nb_emb)), tf.TensorShape((None,))])
 
             beam_tokens = tf.transpose(beam_tokens.stack(), [1, 0, 2])[:, -length:, :]
